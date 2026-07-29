@@ -19,5 +19,10 @@ const CONFIG = {
   SOURCE_HAS_HEADER: true,
 
   // エラー発生時に通知したいメールアドレス。空文字なら通知しない。
-  NOTIFY_EMAIL: ''
+  NOTIFY_EMAIL: '',
+
+  TIME_ZONE: 'Asia/Tokyo',
+
+  // 処理済みファイルIDを記録しておく数（moveTo失敗時などの二重処理を防ぐ保険）
+  PROCESSED_LOG_MAX: 300
 };
