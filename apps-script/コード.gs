@@ -3,13 +3,14 @@
  *
  * - SOURCE_FOLDER_ID 配下のANDPAD出力.xlsx（Googleスプレッドシートも可）を読み取り、
  *   「31期予材リスト」の「週次報告記録」シート末尾に追記する。
- * - .xlsxは手動変換不要。Drive API (Advanced Service) で一時的にGoogleスプレッドシートへ変換して読み取る。
+ * - .xlsxは手動変換不要。Drive API v3 (UrlFetchApp経由、Advanced Serviceは不要) で一時的にGoogleスプレッドシートへ変換して読み取る。
  * - 列はヘッダー名でマッチングするため、ANDPAD側の列順変更や列追加に強い。
  * - 転記済みファイルは「処理済み」フォルダへ移動し、同名ファイルがあればリネームして衝突を回避する。
  * - 万一の移動失敗に備え、処理済みファイルIDをスクリプトプロパティに記録し、再走時の二重追記を防ぐ。
  *
  * 事前準備:
- *   1. GASエディタの「サービス」から Drive API (Advanced Service, v3) を追加する。
+ *   1. appsscript.json の oauthScopes を反映する（マニフェストをエディタで表示して appsscript.json の内容を貼り付ける）。
+ *      GASの「サービス」から Drive API を追加する必要はない。
  *   2. このファイルの内容を「コード.gs」に丸ごと貼り付ける（既存の中身は全削除してから貼り付けること）。
  */
 
@@ -213,11 +214,43 @@ function ensureColumnsExist_(targetSheet, headerNames) {
  * ファイル自体のmimeTypeがxlsxとして正しく設定されていなくても、中身のバイト列から変換される。
  */
 function convertToTemporaryGoogleSheet_(file) {
-  const resource = {
+  const boundary = 'gas_boundary_' + Utilities.getUuid();
+  const metadata = {
     name: '__tmp_convert_' + file.getId(),
     mimeType: MimeType.GOOGLE_SHEETS
   };
-  return Drive.Files.create(resource, file.getBlob());
+  const blob = file.getBlob();
+
+  const delimiter = '\r\n--' + boundary + '\r\n';
+  const closeDelimiter = '\r\n--' + boundary + '--';
+
+  const multipartBody =
+    delimiter +
+    'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+    JSON.stringify(metadata) +
+    delimiter +
+    'Content-Type: ' + blob.getContentType() + '\r\n' +
+    'Content-Transfer-Encoding: base64\r\n\r\n' +
+    Utilities.base64Encode(blob.getBytes()) +
+    closeDelimiter;
+
+  const response = UrlFetchApp.fetch(
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',
+    {
+      method: 'post',
+      contentType: 'multipart/related; boundary="' + boundary + '"',
+      payload: multipartBody,
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true
+    }
+  );
+
+  const statusCode = response.getResponseCode();
+  const result = JSON.parse(response.getContentText());
+  if (statusCode >= 300 || !result.id) {
+    throw new Error('Excel変換に失敗しました (status ' + statusCode + '): ' + response.getContentText());
+  }
+  return { id: result.id };
 }
 
 /**

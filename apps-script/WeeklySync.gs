@@ -172,15 +172,48 @@ function ensureColumnsExist_(targetSheet, headerNames) {
 
 /**
  * Excel(.xlsx/.xls)ファイルを一時的にGoogleスプレッドシート形式へ変換する。
- * Drive API (Advanced Service) で、アップロード時にmimeTypeを変えることで自動変換される。
+ * Drive API v3 の files.create を UrlFetchApp から直接呼び出し、アップロード時に
+ * mimeTypeをGoogleスプレッドシートに変えることで自動変換させる（Advanced Serviceは使わない）。
  * ファイル自体のmimeTypeがxlsxとして正しく設定されていなくても、中身のバイト列から変換される。
  */
 function convertToTemporaryGoogleSheet_(file) {
-  const resource = {
+  const boundary = 'gas_boundary_' + Utilities.getUuid();
+  const metadata = {
     name: '__tmp_convert_' + file.getId(),
     mimeType: MimeType.GOOGLE_SHEETS
   };
-  return Drive.Files.create(resource, file.getBlob());
+  const blob = file.getBlob();
+
+  const delimiter = '\r\n--' + boundary + '\r\n';
+  const closeDelimiter = '\r\n--' + boundary + '--';
+
+  const multipartBody =
+    delimiter +
+    'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+    JSON.stringify(metadata) +
+    delimiter +
+    'Content-Type: ' + blob.getContentType() + '\r\n' +
+    'Content-Transfer-Encoding: base64\r\n\r\n' +
+    Utilities.base64Encode(blob.getBytes()) +
+    closeDelimiter;
+
+  const response = UrlFetchApp.fetch(
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',
+    {
+      method: 'post',
+      contentType: 'multipart/related; boundary="' + boundary + '"',
+      payload: multipartBody,
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true
+    }
+  );
+
+  const statusCode = response.getResponseCode();
+  const result = JSON.parse(response.getContentText());
+  if (statusCode >= 300 || !result.id) {
+    throw new Error('Excel変換に失敗しました (status ' + statusCode + '): ' + response.getContentText());
+  }
+  return { id: result.id };
 }
 
 /**
