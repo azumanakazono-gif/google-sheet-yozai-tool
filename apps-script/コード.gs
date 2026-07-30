@@ -210,7 +210,8 @@ function ensureColumnsExist_(targetSheet, headerNames) {
 
 /**
  * Excel(.xlsx/.xls)ファイルを一時的にGoogleスプレッドシート形式へ変換する。
- * Drive API (Advanced Service) で、アップロード時にmimeTypeを変えることで自動変換される。
+ * UrlFetchAppでDrive API v3のfiles.createを直接呼び出し(Advanced Serviceは不使用)、
+ * アップロード時にmimeTypeを変えることで自動変換させる。
  * ファイル自体のmimeTypeがxlsxとして正しく設定されていなくても、中身のバイト列から変換される。
  */
 function convertToTemporaryGoogleSheet_(file) {
