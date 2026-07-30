@@ -1,11 +1,12 @@
 /**
  * 予材リスト週次同期スクリプト（単一ファイル版）
  *
- * - SOURCE_FOLDER_ID 配下のANDPAD出力.xlsx（Googleスプレッドシートも可）を読み取り、
+ * - SOURCE_FOLDER_ID 配下のANDPAD出力Excelファイル（Googleスプレッドシートも可）を読み取り、
  *   「31期予材リスト」の「週次報告記録」シート末尾に追記する。
- * - .xlsxは DriveApp + Utilities.unzip + XmlService のみで直接パースする（Advanced Drive Service、
- *   UrlFetchApp、外部API呼び出しは一切使わない）。.xlsxはZIP形式でXMLを内包しているため、
- *   ファイル自体の変換は不要。
+ * - Excelファイルは DriveApp + Utilities.unzip + XmlService のみで直接パースする（Advanced Drive
+ *   Service、UrlFetchApp、外部API呼び出しは一切使わない）。ANDPAD等の「拡張子は.xlsxだが中身は
+ *   標準ZIPではない(HTMLテーブル等)」出力にも対応するため、先頭バイトで実体を判別し、
+ *   ZIP/.xlsx・HTMLテーブルの2通りの読み取り方法へ自動でフォールバックする。
  * - 列はヘッダー名でマッチングするため、ANDPAD側の列順変更や列追加に強い。
  * - 転記済みファイルは「処理済み」フォルダへ移動し、同名ファイルがあればリネームして衝突を回避する。
  * - 万一の移動失敗に備え、処理済みファイルIDをスクリプトプロパティに記録し、再走時の二重追記を防ぐ。
@@ -45,9 +46,6 @@ const CONFIG = {
 
 // ===== メイン処理 =====
 
-/**
- * 週次実行のエントリーポイント。トリガーにはこの関数を設定する。
- */
 function syncWeeklyReports() {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) {
@@ -119,9 +117,17 @@ function syncWeeklyReports() {
  */
 function appendFileToTargetSheet_(file, targetSheet) {
   const mimeType = file.getMimeType();
-  const values = mimeType === MimeType.GOOGLE_SHEETS
-    ? SpreadsheetApp.openById(file.getId()).getSheets()[0].getDataRange().getValues()
-    : readXlsxAsValues_(file);
+  let values;
+
+  if (mimeType === MimeType.GOOGLE_SHEETS) {
+    try {
+      values = SpreadsheetApp.openById(file.getId()).getSheets()[0].getDataRange().getValues();
+    } catch (e) {
+      throw new Error('Googleスプレッドシートとして開けませんでした(id: ' + file.getId() + ')。詳細: ' + e);
+    }
+  } else {
+    values = readXlsxAsValues_(file);
+  }
 
   if (values.length === 0) {
     Logger.log('データなし: ' + file.getName());
@@ -194,21 +200,84 @@ function ensureColumnsExist_(targetSheet, headerNames) {
 }
 
 /**
- * .xlsx(Office Open XML)ファイルをDriveAppとGAS標準サービスだけで読み取り、
+ * DriveAppとGAS標準サービスだけでExcelファイルを読み取り、
  * SpreadsheetApp.getDataRange().getValues()相当の2次元配列を返す。
- *
- * .xlsxの実体はZIPアーカイブなので、Utilities.unzipでXMLを取り出し、XmlServiceでパースする。
  * Advanced Drive Service・UrlFetchApp・外部API呼び出しは一切使わない。
- * 旧形式のバイナリ.xls(Excel 97-2003)はZIPではないため非対応（.xlsxで保存し直す必要がある）。
+ *
+ * ANDPAD等の出力は「拡張子は.xlsxだが中身は標準ZIP構造ではない」ケースがあるため、
+ * ファイル先頭のマジックバイトで実体を判別し、3通りの読み取り方法にフォールバックする。
+ *   1. 本物の.xlsx(ZIP構造): Utilities.unzip + XmlServiceで直接パース。
+ *   2. 旧形式バイナリ.xls(OLE構造): パース不可のため、その旨を明確なエラーで通知する。
+ *   3. HTMLテーブルを.xlsx/.xlsとして出力している場合: <table>をHTMLとして解析する。
  */
 function readXlsxAsValues_(file) {
-  const zipBlob = file.getBlob().setContentType('application/zip');
+  const blob = file.getBlob();
+  const bytes = blob.getBytes();
+
+  if (looksLikeZip_(bytes)) {
+    return readValuesFromXlsxZip_(blob);
+  }
+
+  if (looksLikeLegacyOle_(bytes)) {
+    throw new Error(
+      '旧形式のバイナリExcelファイル(.xls, Excel 97-2003形式)は読み取れません。.xlsx形式で保存し直してください。'
+    );
+  }
+
+  const text = decodeTextBlob_(blob);
+  if (/<html[\s>]|<table[\s>]/i.test(text.slice(0, 4000))) {
+    return readValuesFromHtmlTable_(text);
+  }
+
+  throw new Error(
+    '対応していないファイル形式です(ZIP/.xlsxでもHTMLでもありません)。ANDPAD側の出力設定やファイルの破損を確認してください。'
+  );
+}
+
+/**
+ * ZIPファイルの先頭マジックバイト("PK")かどうかを判定する。
+ */
+function looksLikeZip_(bytes) {
+  return bytes.length >= 2 && bytes[0] === 0x50 && bytes[1] === 0x4b;
+}
+
+/**
+ * 旧形式バイナリOffice文書(OLE Compound File)の先頭マジックバイトかどうかを判定する。
+ */
+function looksLikeLegacyOle_(bytes) {
+  if (bytes.length < 4) return false;
+  const b0 = bytes[0] < 0 ? bytes[0] + 256 : bytes[0];
+  const b1 = bytes[1] < 0 ? bytes[1] + 256 : bytes[1];
+  const b2 = bytes[2] < 0 ? bytes[2] + 256 : bytes[2];
+  const b3 = bytes[3] < 0 ? bytes[3] + 256 : bytes[3];
+  return b0 === 0xd0 && b1 === 0xcf && b2 === 0x11 && b3 === 0xe0;
+}
+
+/**
+ * blobのテキストをUTF-8で読み、内部にShift_JIS系のcharset宣言が見つかればShift_JISで読み直す。
+ * (ANDPAD等、日本語業務システムのHTML書き出しはShift_JISであることが多いため)
+ */
+function decodeTextBlob_(blob) {
+  const utf8Text = blob.getDataAsString('UTF-8');
+  const metaMatch = utf8Text.slice(0, 2000).match(/charset\s*=\s*["']?([\w-]+)/i);
+  const charset = metaMatch ? metaMatch[1].toLowerCase() : '';
+  if (/shift[-_]?jis|sjis|ms932|windows-31j/.test(charset)) {
+    return blob.getDataAsString('Shift_JIS');
+  }
+  return utf8Text;
+}
+
+/**
+ * 本物の.xlsx(ZIP構造)をUtilities.unzip + XmlServiceで直接パースする。
+ */
+function readValuesFromXlsxZip_(blob) {
+  const zipBlob = blob.setContentType('application/zip');
   let entries;
   try {
     entries = Utilities.unzip(zipBlob);
   } catch (e) {
     throw new Error(
-      '.xlsx(ZIP形式)として読み取れませんでした。旧形式の.xlsの場合は.xlsxで保存し直してください。詳細: ' + e
+      '.xlsx(ZIP形式)として展開できませんでした。詳細: ' + e
     );
   }
 
@@ -225,6 +294,58 @@ function readXlsxAsValues_(file) {
 
   const sharedStrings = parseSharedStrings_(entryMap['xl/sharedStrings.xml']);
   return parseWorksheetXml_(sheetEntry.getDataAsString('UTF-8'), sharedStrings);
+}
+
+/**
+ * ANDPAD等が「Excelファイル」と称して実際にはHTMLテーブルを出力しているケース向けの
+ * フォールバック。複数の<table>がある場合は行数が最も多いものをデータ本体とみなす。
+ * XmlServiceでの厳密なXMLパースはHTMLの崩れ(閉じタグ漏れ等)で失敗しやすいため、
+ * 正規表現ベースの緩いパースで抽出する。
+ */
+function readValuesFromHtmlTable_(html) {
+  const tableBlocks = html.match(/<table[\s\S]*?<\/table>/gi) || [html];
+  let bestBlock = tableBlocks[0];
+  let bestRowCount = -1;
+  tableBlocks.forEach(function (block) {
+    const rowCount = (block.match(/<tr[\s>]/gi) || []).length;
+    if (rowCount > bestRowCount) {
+      bestRowCount = rowCount;
+      bestBlock = block;
+    }
+  });
+
+  const rowMatches = bestBlock.match(/<tr[\s\S]*?<\/tr>/gi) || [];
+  const rows = rowMatches.map(function (rowHtml) {
+    const cellMatches = rowHtml.match(/<t[dh][\s\S]*?<\/t[dh]>/gi) || [];
+    return cellMatches.map(function (cellHtml) {
+      const inner = cellHtml.replace(/^<t[dh][^>]*>/i, '').replace(/<\/t[dh]>$/i, '');
+      const withBreaks = inner.replace(/<br\s*\/?>/gi, '\n');
+      const stripped = withBreaks.replace(/<[^>]+>/g, '');
+      return decodeHtmlEntities_(stripped).trim();
+    });
+  });
+
+  const maxCol = rows.reduce(function (max, r) { return Math.max(max, r.length); }, 0);
+  return rows.map(function (row) {
+    const padded = row.slice();
+    while (padded.length < maxCol) padded.push('');
+    return padded;
+  });
+}
+
+/**
+ * HTMLの主要なエンティティ(&nbsp;等)をデコードする。
+ */
+function decodeHtmlEntities_(text) {
+  return text
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x([0-9a-fA-F]+);/g, function (_, hex) { return String.fromCharCode(parseInt(hex, 16)); })
+    .replace(/&#(\d+);/g, function (_, dec) { return String.fromCharCode(parseInt(dec, 10)); });
 }
 
 /**
@@ -429,15 +550,6 @@ function getProcessedIds_() {
   return raw ? JSON.parse(raw) : [];
 }
 
-/**
- * 処理済みファイルIDの記録をリセットする。
- * テストのため同じファイルをもう一度処理させたい場合などに、この関数だけを手動実行する。
- */
-function resetProcessedLog() {
-  PropertiesService.getScriptProperties().deleteProperty('PROCESSED_FILE_IDS');
-  Logger.log('処理済みログをリセットしました。');
-}
-
 function getOrCreateSubFolder_(parentFolder, name) {
   const folders = parentFolder.getFoldersByName(name);
   if (folders.hasNext()) return folders.next();
@@ -475,4 +587,13 @@ function installWeeklyTrigger() {
     .onWeekDay(ScriptApp.WeekDay.MONDAY)
     .atHour(6)
     .create();
+}
+
+/**
+ * 処理済みファイルIDの記録をリセットする。
+ * テストのため同じファイルをもう一度処理させたい場合などに、この関数だけを手動実行する。
+ */
+function resetProcessedLog() {
+  PropertiesService.getScriptProperties().deleteProperty('PROCESSED_FILE_IDS');
+  Logger.log('処理済みログをリセットしました。');
 }
