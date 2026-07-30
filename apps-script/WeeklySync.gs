@@ -2,7 +2,9 @@
  * 週次: SOURCE_FOLDER_ID 配下に置かれたANDPAD出力の.xlsx（Googleスプレッドシートも可）を読み取り、
  * 「31期予材リスト」の「週次報告記録」シート末尾に追記する。
  *
- * - .xlsxはDrive APIでGoogleスプレッドシートへ一時変換して読み取るため、手動変換は不要。
+ * - .xlsxは DriveApp + Utilities.unzip + XmlService のみで直接パースする（Advanced Drive Service、
+ *   UrlFetchApp、外部API呼び出しは一切使わない）。.xlsxはZIP形式でXMLを内包しているため、
+ *   ファイル自体の変換は不要。
  * - 列はヘッダー名でマッチングして書き込むため、ANDPAD側の列順変更や列追加（フォーマットの揺れ）に強い。
  * - 転記済みファイルは「処理済み」フォルダへ移動し、同名ファイルがあればリネームして衝突を回避する。
  * - 万一の移動失敗に備え、処理済みファイルIDをプロパティに記録し、再走時の二重追記を防ぐ。
@@ -78,63 +80,45 @@ function syncWeeklyReports() {
  */
 function appendFileToTargetSheet_(file, targetSheet) {
   const mimeType = file.getMimeType();
-  let workingSpreadsheetId;
-  let tempFileId = null;
+  const values = mimeType === MimeType.GOOGLE_SHEETS
+    ? SpreadsheetApp.openById(file.getId()).getSheets()[0].getDataRange().getValues()
+    : readXlsxAsValues_(file);
 
-  if (mimeType === MimeType.GOOGLE_SHEETS) {
-    workingSpreadsheetId = file.getId();
-  } else {
-    const converted = convertToTemporaryGoogleSheet_(file);
-    workingSpreadsheetId = converted.id;
-    tempFileId = converted.id;
+  if (values.length === 0) {
+    Logger.log('データなし: ' + file.getName());
+    return;
   }
 
-  try {
-    const sourceSpreadsheet = SpreadsheetApp.openById(workingSpreadsheetId);
-    const sourceSheet = sourceSpreadsheet.getSheets()[0];
-    const values = sourceSheet.getDataRange().getValues();
+  const hasHeader = CONFIG.SOURCE_HAS_HEADER;
+  const rawHeader = hasHeader ? values[0] : values[0].map(function (_, idx) { return '列' + (idx + 1); });
+  const sourceHeader = rawHeader.map(function (h) { return String(h).trim(); });
+  const dataRows = (hasHeader ? values.slice(1) : values).filter(function (row) {
+    return row.some(function (cell) { return cell !== '' && cell !== null; });
+  });
 
-    if (values.length === 0) {
-      Logger.log('データなし: ' + file.getName());
-      return;
-    }
-
-    const hasHeader = CONFIG.SOURCE_HAS_HEADER;
-    const rawHeader = hasHeader ? values[0] : values[0].map(function (_, idx) { return '列' + (idx + 1); });
-    const sourceHeader = rawHeader.map(function (h) { return String(h).trim(); });
-    const dataRows = (hasHeader ? values.slice(1) : values).filter(function (row) {
-      return row.some(function (cell) { return cell !== '' && cell !== null; });
-    });
-
-    if (dataRows.length === 0) {
-      Logger.log('データ行なし: ' + file.getName());
-      return;
-    }
-
-    const headerMap = ensureColumnsExist_(targetSheet, sourceHeader);
-    const totalCols = targetSheet.getLastColumn();
-    const timestamp = new Date();
-
-    const rowsToAppend = dataRows.map(function (row) {
-      const outRow = new Array(totalCols).fill('');
-      outRow[headerMap['取込日時'] - 1] = timestamp;
-      outRow[headerMap['元ファイル名'] - 1] = file.getName();
-      sourceHeader.forEach(function (colName, idx) {
-        if (!colName) return;
-        const col = headerMap[colName];
-        if (col) outRow[col - 1] = row[idx];
-      });
-      return outRow;
-    });
-
-    const lastRow = targetSheet.getLastRow();
-    targetSheet.getRange(lastRow + 1, 1, rowsToAppend.length, totalCols).setValues(rowsToAppend);
-  } finally {
-    // 変換のために作った一時ファイルはゴミ箱へ送って残さない
-    if (tempFileId) {
-      DriveApp.getFileById(tempFileId).setTrashed(true);
-    }
+  if (dataRows.length === 0) {
+    Logger.log('データ行なし: ' + file.getName());
+    return;
   }
+
+  const headerMap = ensureColumnsExist_(targetSheet, sourceHeader);
+  const totalCols = targetSheet.getLastColumn();
+  const timestamp = new Date();
+
+  const rowsToAppend = dataRows.map(function (row) {
+    const outRow = new Array(totalCols).fill('');
+    outRow[headerMap['取込日時'] - 1] = timestamp;
+    outRow[headerMap['元ファイル名'] - 1] = file.getName();
+    sourceHeader.forEach(function (colName, idx) {
+      if (!colName) return;
+      const col = headerMap[colName];
+      if (col) outRow[col - 1] = row[idx];
+    });
+    return outRow;
+  });
+
+  const lastRow = targetSheet.getLastRow();
+  targetSheet.getRange(lastRow + 1, 1, rowsToAppend.length, totalCols).setValues(rowsToAppend);
 }
 
 /**
@@ -171,49 +155,187 @@ function ensureColumnsExist_(targetSheet, headerNames) {
 }
 
 /**
- * Excel(.xlsx/.xls)ファイルを一時的にGoogleスプレッドシート形式へ変換する。
- * Drive API v3 の files.create を UrlFetchApp から直接呼び出し、アップロード時に
- * mimeTypeをGoogleスプレッドシートに変えることで自動変換させる（Advanced Serviceは使わない）。
- * ファイル自体のmimeTypeがxlsxとして正しく設定されていなくても、中身のバイト列から変換される。
+ * .xlsx(Office Open XML)ファイルをDriveAppとGAS標準サービスだけで読み取り、
+ * SpreadsheetApp.getDataRange().getValues()相当の2次元配列を返す。
+ *
+ * .xlsxの実体はZIPアーカイブなので、Utilities.unzipでXMLを取り出し、XmlServiceでパースする。
+ * Advanced Drive Service・UrlFetchApp・外部API呼び出しは一切使わない。
+ * 旧形式のバイナリ.xls(Excel 97-2003)はZIPではないため非対応（.xlsxで保存し直す必要がある）。
  */
-function convertToTemporaryGoogleSheet_(file) {
-  const boundary = 'gas_boundary_' + Utilities.getUuid();
-  const metadata = {
-    name: '__tmp_convert_' + file.getId(),
-    mimeType: MimeType.GOOGLE_SHEETS
-  };
-  const blob = file.getBlob();
-
-  const delimiter = '\r\n--' + boundary + '\r\n';
-  const closeDelimiter = '\r\n--' + boundary + '--';
-
-  const multipartBody =
-    delimiter +
-    'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
-    JSON.stringify(metadata) +
-    delimiter +
-    'Content-Type: ' + blob.getContentType() + '\r\n' +
-    'Content-Transfer-Encoding: base64\r\n\r\n' +
-    Utilities.base64Encode(blob.getBytes()) +
-    closeDelimiter;
-
-  const response = UrlFetchApp.fetch(
-    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',
-    {
-      method: 'post',
-      contentType: 'multipart/related; boundary="' + boundary + '"',
-      payload: multipartBody,
-      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
-      muteHttpExceptions: true
-    }
-  );
-
-  const statusCode = response.getResponseCode();
-  const result = JSON.parse(response.getContentText());
-  if (statusCode >= 300 || !result.id) {
-    throw new Error('Excel変換に失敗しました (status ' + statusCode + '): ' + response.getContentText());
+function readXlsxAsValues_(file) {
+  const zipBlob = file.getBlob().setContentType('application/zip');
+  let entries;
+  try {
+    entries = Utilities.unzip(zipBlob);
+  } catch (e) {
+    throw new Error(
+      '.xlsx(ZIP形式)として読み取れませんでした。旧形式の.xlsの場合は.xlsxで保存し直してください。詳細: ' + e
+    );
   }
-  return { id: result.id };
+
+  const entryMap = {};
+  entries.forEach(function (entry) {
+    entryMap[entry.getName()] = entry;
+  });
+
+  const sheetPath = resolveFirstSheetPath_(entryMap);
+  const sheetEntry = entryMap[sheetPath];
+  if (!sheetEntry) {
+    throw new Error('ワークシートのXMLが見つかりませんでした(' + sheetPath + ')。');
+  }
+
+  const sharedStrings = parseSharedStrings_(entryMap['xl/sharedStrings.xml']);
+  return parseWorksheetXml_(sheetEntry.getDataAsString('UTF-8'), sharedStrings);
+}
+
+/**
+ * xl/workbook.xml と xl/_rels/workbook.xml.rels から、1番目のシート(タブ順で先頭)の
+ * 実体XMLパスを求める。解決できない場合は慣例的な既定パスにフォールバックする。
+ */
+function resolveFirstSheetPath_(entryMap) {
+  const fallback = 'xl/worksheets/sheet1.xml';
+  const workbookEntry = entryMap['xl/workbook.xml'];
+  const relsEntry = entryMap['xl/_rels/workbook.xml.rels'];
+  if (!workbookEntry || !relsEntry) return fallback;
+
+  try {
+    const workbookDoc = XmlService.parse(workbookEntry.getDataAsString('UTF-8'));
+    const ns = workbookDoc.getRootElement().getNamespace();
+    const rIdNs = XmlService.getNamespace(
+      'r',
+      'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+    );
+    const sheetsEl = workbookDoc.getRootElement().getChild('sheets', ns);
+    const firstSheet = sheetsEl.getChildren('sheet', ns)[0];
+    const rId = firstSheet.getAttribute('id', rIdNs).getValue();
+
+    const relsDoc = XmlService.parse(relsEntry.getDataAsString('UTF-8'));
+    const relsNs = relsDoc.getRootElement().getNamespace();
+    const relationships = relsDoc.getRootElement().getChildren('Relationship', relsNs);
+    let target = null;
+    relationships.forEach(function (rel) {
+      if (rel.getAttribute('Id').getValue() === rId) {
+        target = rel.getAttribute('Target').getValue();
+      }
+    });
+    if (!target) return fallback;
+    return target.indexOf('xl/') === 0 ? target : 'xl/' + target.replace(/^\/+/, '');
+  } catch (e) {
+    return fallback;
+  }
+}
+
+/**
+ * xl/sharedStrings.xml を読み、インデックス順の文字列配列を返す（存在しなければ空配列）。
+ */
+function parseSharedStrings_(entry) {
+  if (!entry) return [];
+  const doc = XmlService.parse(entry.getDataAsString('UTF-8'));
+  const ns = doc.getRootElement().getNamespace();
+  const siList = doc.getRootElement().getChildren('si', ns);
+  return siList.map(function (si) {
+    return extractText_(si, ns);
+  });
+}
+
+/**
+ * <si>要素からテキストを取り出す。直接<t>を持つ場合と、<r><t>...</t></r>の
+ * リッチテキストの場合の両方に対応する。
+ */
+function extractText_(si, ns) {
+  const directT = si.getChild('t', ns);
+  if (directT) return directT.getText();
+  const runs = si.getChildren('r', ns);
+  return runs
+    .map(function (r) {
+      const t = r.getChild('t', ns);
+      return t ? t.getText() : '';
+    })
+    .join('');
+}
+
+/**
+ * xl/worksheets/sheetN.xml をパースし、getDataRange().getValues()相当の2次元配列を作る。
+ * Excelは空セル・空行を省略して出力するため、行番号(r属性)・列文字(セル参照)から
+ * 実際の位置に値を配置し、抜けている箇所は空文字で埋める。
+ */
+function parseWorksheetXml_(xmlText, sharedStrings) {
+  const doc = XmlService.parse(xmlText);
+  const ns = doc.getRootElement().getNamespace();
+  const sheetData = doc.getRootElement().getChild('sheetData', ns);
+  if (!sheetData) return [];
+
+  const rows = sheetData.getChildren('row', ns);
+  let maxCol = 0;
+
+  const parsedRows = rows.map(function (row) {
+    const rowIndex = parseInt(row.getAttribute('r').getValue(), 10);
+    const cells = row.getChildren('c', ns);
+    const rowValues = {};
+    cells.forEach(function (cell) {
+      const ref = cell.getAttribute('r').getValue();
+      const letters = ref.match(/^[A-Za-z]+/)[0].toUpperCase();
+      const colIndex = columnLetterToIndex_(letters);
+      if (colIndex > maxCol) maxCol = colIndex;
+      rowValues[colIndex] = extractCellValue_(cell, ns, sharedStrings);
+    });
+    return { rowIndex: rowIndex, values: rowValues };
+  });
+
+  const maxRow = parsedRows.reduce(function (max, r) { return Math.max(max, r.rowIndex); }, 0);
+  const values = [];
+  for (let r = 0; r < maxRow; r++) {
+    values.push(new Array(maxCol).fill(''));
+  }
+  parsedRows.forEach(function (row) {
+    Object.keys(row.values).forEach(function (colKey) {
+      const colIndex = Number(colKey);
+      values[row.rowIndex - 1][colIndex - 1] = row.values[colKey];
+    });
+  });
+
+  return values;
+}
+
+/**
+ * <c>(セル)要素から値を取り出す。t属性でshared string/真偽値/インライン文字列/数値を判別する。
+ */
+function extractCellValue_(cell, ns, sharedStrings) {
+  const typeAttr = cell.getAttribute('t');
+  const type = typeAttr ? typeAttr.getValue() : null;
+
+  if (type === 'inlineStr') {
+    const isEl = cell.getChild('is', ns);
+    return isEl ? extractText_(isEl, ns) : '';
+  }
+
+  const vEl = cell.getChild('v', ns);
+  if (!vEl) return '';
+  const raw = vEl.getText();
+
+  if (type === 's') {
+    const idx = parseInt(raw, 10);
+    return sharedStrings[idx] !== undefined ? sharedStrings[idx] : '';
+  }
+  if (type === 'b') {
+    return raw === '1';
+  }
+  if (type === 'str' || type === 'e') {
+    return raw;
+  }
+  const num = Number(raw);
+  return isNaN(num) ? raw : num;
+}
+
+/**
+ * "A"→1, "Z"→26, "AA"→27 のように列文字を1始まりの列番号に変換する。
+ */
+function columnLetterToIndex_(letters) {
+  let index = 0;
+  for (let i = 0; i < letters.length; i++) {
+    index = index * 26 + (letters.charCodeAt(i) - 64);
+  }
+  return index;
 }
 
 /**

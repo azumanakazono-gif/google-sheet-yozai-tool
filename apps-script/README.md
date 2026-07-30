@@ -10,7 +10,7 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 
 | ファイル | 役割 |
 | --- | --- |
-| `appsscript.json` | マニフェスト。Drive/Sheets等へアクセスするための `oauthScopes` を含む（Advanced Serviceは不要） |
+| `appsscript.json` | マニフェスト（タイムゾーン等のみ。Advanced Serviceや特別な`oauthScopes`設定は不要） |
 | `Config.gs` | フォルダID・シート名などの設定値 |
 | `WeeklySync.gs` | メイン処理 (`syncWeeklyReports`) |
 | `Triggers.gs` | 週次トリガーをスクリプトから設定するためのヘルパー (`installWeeklyTrigger`) |
@@ -20,8 +20,8 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 
 ## 処理内容
 
-1. `SOURCE_FOLDER_ID` フォルダ直下のファイルを走査する。対象はGoogleスプレッドシートおよびExcel(.xlsx/.xls)。ANDPAD出力ファイルはmimeTypeが正しく設定されないことがあるため、mimeTypeで判定できない場合はファイル名の拡張子でもフォールバック判定する。
-2. Excelファイルは **手動変換不要** で、Drive API v3 の `files.create` を `UrlFetchApp` から直接呼び出して一時的にGoogleスプレッドシート形式へ変換し、1シート目のデータを読み取る（GASの「サービス」からAdvanced Drive Serviceを追加する必要はない）。変換用の一時ファイルは処理後にゴミ箱へ送って残さない。
+1. `SOURCE_FOLDER_ID` フォルダ直下のファイルを走査する。対象はGoogleスプレッドシートおよびExcel(.xlsx)。ANDPAD出力ファイルはmimeTypeが正しく設定されないことがあるため、mimeTypeで判定できない場合はファイル名の拡張子でもフォールバック判定する。
+2. `.xlsx`ファイルは **手動変換不要・外部API呼び出し不要** で読み取る。`.xlsx`の実体はZIPアーカイブなので、GAS標準の`Utilities.unzip`でXMLを取り出し、同じくGAS標準の`XmlService`でパースして値を抽出する。Advanced Drive Service・UrlFetchApp・Drive REST APIなど、Driveの外部変換処理は一切使わない。
 3. 列は **ヘッダー名でマッチング** して「週次報告記録」シートに書き込む。ANDPAD側で列の並び順が変わったり、新しい列が追加されたりしても、既存の列名と一致するものは対応する列にそのまま入り、未知の列名が来た場合はシートのヘッダーに自動で追加される（「フォーマットの揺れ」への対応）。取込日時・元ファイル名は常に先頭2列に入る。
 4. 追記が終わったファイルは `処理済み` サブフォルダへ移動し、次回以降のスキャン対象から除外することで二重処理を防止する。同名ファイルが既に `処理済み` にある場合（ANDPADが毎回同じファイル名で出力するケースを想定）はタイムスタンプを付けてリネームしてから移動するため、上書き・混同は起きない。
 5. 追記が完了した時点でファイルIDをスクリプトプロパティに記録する。仮にその後の「処理済みフォルダへの移動」が失敗しても、次回実行時は記録済みIDのファイルを再追記せずスキップし、移動だけを再試行する（二重処理防止の保険）。
@@ -31,22 +31,20 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 
 ## セットアップ手順
 
-**Advanced Drive Serviceの追加は不要です。** Drive APIへのアクセスは `UrlFetchApp` + OAuthトークンで直接行うため、GASエディタの「サービス」から何かを追加する必要はありません。その代わり、マニフェスト(`appsscript.json`)の `oauthScopes` を明示的に設定する必要があります。
+**Advanced Serviceの追加もマニフェストの特別な設定も不要です。** DriveApp・SpreadsheetApp・Utilities・XmlServiceはすべてGASの標準サービスで、有効化操作は要りません。`appsscript.json`はタイムゾーン設定程度のシンプルな内容です。
 
 ### 単一ファイル版（`コード.gs`）を使う場合（迷ったらこちら）
 
 1. [script.google.com](https://script.google.com) で新規プロジェクトを作成する（「31期予材リスト」に紐づくコンテナバインド型でも、スタンドアロン型でもどちらでも可）。
-2. エディタ左の「プロジェクトの設定」（歯車アイコン）で「"appsscript.json" マニフェスト ファイルをエディタで表示する」にチェックを入れる。
-3. エディタに追加された `appsscript.json` を開き、中身をこのリポジトリの `apps-script/appsscript.json` の内容で置き換える。
-4. デフォルトで存在する「コード.gs」を開き、**中身を全選択して一度すべて削除**してから、この`コード.gs`の内容を丸ごと貼り付ける（既存コードの一部が残っていると構文エラーの原因になるため、必ず全削除してから貼り付けること）。
-5. エディタ上部の関数選択で `syncWeeklyReports` を選び、一度手動実行して権限承認（Drive・スプレッドシート・外部リクエスト等へのアクセス許可）を行う。
-6. 実行ログ (表示 → 実行数、またはログ) で正常終了・追記結果を確認する。
+2. デフォルトで存在する「コード.gs」を開き、**中身を全選択して一度すべて削除**してから、この`コード.gs`の内容を丸ごと貼り付ける（既存コードの一部が残っていると構文エラーの原因になるため、必ず全削除してから貼り付けること）。
+3. エディタ上部の関数選択で `syncWeeklyReports` を選び、一度手動実行して権限承認（Drive・スプレッドシートへのアクセス許可）を行う。
+4. 実行ログ (表示 → 実行数、またはログ) で正常終了・追記結果を確認する。
 
 ### 分割ファイル版（`Config.gs`/`WeeklySync.gs`/`Triggers.gs`）を使う場合
 
-1. 上記1〜3と同様にプロジェクトを作成し、`appsscript.json` を反映する。
+1. 上記1と同様にプロジェクトを作成する。
 2. `Config.gs` / `WeeklySync.gs` / `Triggers.gs` の内容をそれぞれ同名のスクリプトファイルとして貼り付ける（デフォルトの「コード.gs」は削除するか空にしておく）。
-3. 上記の5〜6と同様の手順（手動実行 → 権限承認 → ログ確認）を行う。
+3. 上記の3〜4と同様の手順（手動実行 → 権限承認 → ログ確認）を行う。
 
 ## 週次トリガーの設定手順
 
@@ -71,7 +69,9 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 
 ## 補足・前提条件
 
-- 取り込むのは各ファイルの **1シート目のみ**。複数シートを取り込みたい場合は `WeeklySync.gs` の `appendFileToTargetSheet_` を修正して `getSheets()` をループする。
+- 取り込むのは各ファイルの **1シート目のみ**。複数シートを取り込みたい場合は `appendFileToTargetSheet_` / `readXlsxAsValues_` を修正してループさせる。
+- **.xlsx(Excel 2007以降のOffice Open XML形式)のみ対応。** 旧形式のバイナリ.xls(Excel 97-2003)はZIPアーカイブではないため読み取れず、エラーとして`エラー`フォルダへ移動される。ANDPADから.xls形式で出力される場合は、事前に.xlsxで保存し直すか、ANDPAD側の出力設定を確認すること。
+- **日付・数値の書式は反映されない。** セルの生の値（文字列/数値/真偽値）をそのまま読み取るため、日付書式が設定されたセルはExcel内部のシリアル値（例: `45123`）としてそのまま入る。日付として扱いたい場合は、取り込み後にスプレッドシート側で書式設定するか、`extractCellValue_`にシリアル値→Dateの変換を追加する。
 - 列はヘッダー名（1行目）でマッチングするため、ANDPAD側で列順が変わったり列が増えたりしても正しい列に入る。ただし **表記ゆれ（例:「品名」と「品目名」など別名扱い）までは自動判定しない**。表記ゆれを吸収したい場合は `ensureColumnsExist_` / `appendFileToTargetSheet_` にエイリアス変換表を追加する。
 - `Config.gs` の `SOURCE_HAS_HEADER` が `false` の場合は「列1」「列2」...という仮のヘッダー名で取り込む（フォーマット変動への耐性は下がる）。
 - `Config.gs` の `NOTIFY_EMAIL` にメールアドレスを設定すると、処理失敗時のみ通知メールが届く。
@@ -79,4 +79,4 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 
 ## トラブルシューティング
 
-- **`TypeError: Drive.Files.create is not a function`**: 旧バージョンのコードでAdvanced Drive Serviceに依存していた際に、GASエディタの「サービス」で追加したバージョンがv2だった場合などに発生していたエラー。現在のコードはAdvanced Drive Serviceを使わず`UrlFetchApp`でDrive API v3を直接呼び出すため、このエラーは発生しない。もし発生した場合は、`appsscript.json`の`oauthScopes`が正しく反映されているか（特に`https://www.googleapis.com/auth/drive`）を確認し、一度スクリプトの権限を解除して再認可する。
+- **`TypeError: Drive.Files.create is not a function` / `Bad Request` (Drive.Files.insert)**: いずれも過去のバージョンでAdvanced Drive Service経由のExcel変換を使っていた際に、GASエディタの「サービス」で追加したバージョン(v2/v3)やAPIの呼び出し方の不一致で発生していたエラー。現在のコードはAdvanced Drive Service・Drive REST API・UrlFetchAppを一切使わず、`Utilities.unzip`と`XmlService`だけで.xlsxを直接パースするため、これらのエラーは原理的に発生しない。
