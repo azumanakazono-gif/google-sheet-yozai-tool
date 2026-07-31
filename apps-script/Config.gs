@@ -27,9 +27,9 @@ const CONFIG = {
   PROCESSED_LOG_MAX: 300,
 
   // ===== 転記対象の最大列数 =====
-  // 「週次報告記録」シートへ転記する列はこの列数まで（既定: 19列目 = S列）。
-  // T列(20列目)以降は不要なデータのため、ヘッダー追加・値の書き込みともに対象外とする。
-  MAX_DATA_COLUMNS: 19,
+  // 「週次報告記録」シートへ転記する列はこの列数まで（既定: 24列目 = X列）。
+  // Y列(25列目)以降は不要なデータのため、ヘッダー追加・値の書き込みともに対象外とする。
+  MAX_DATA_COLUMNS: 24,
 
   // ===== 対象期間の区切り行 =====
   // 対象期間はデータ列(J列等)には記録せず、シート全体のデータの先頭(2行目)に
@@ -39,8 +39,8 @@ const CONFIG = {
   PERIOD_SEPARATOR_SUFFIX: '】',
   // 対象期間が判定できなかった場合に区切り行へ表示する文言
   PERIOD_UNKNOWN_LABEL: '不明',
-  // 区切り行をA列からこの列数まで結合する（既定: 19列目 = S列）
-  PERIOD_SEPARATOR_MERGE_COLUMNS: 19,
+  // 区切り行をA列からこの列数まで結合する（既定: MAX_DATA_COLUMNSと同じ24列目 = X列）
+  PERIOD_SEPARATOR_MERGE_COLUMNS: 24,
   // 区切り行の背景色
   PERIOD_SEPARATOR_BACKGROUND_COLOR: '#f3f3f3',
 

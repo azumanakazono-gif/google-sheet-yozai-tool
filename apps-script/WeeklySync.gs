@@ -15,7 +15,7 @@
  *   フォールバック)を算出し、毎週金曜日に報告を締める運用にあわせて、その開始日・終了日を
  *   それぞれが属する「土曜日始まり・金曜日終わり」の週の土曜日・金曜日まで拡張したうえで、
  *   「2行目」に「【対象期間：2026/07/25 〜 2026/07/31】」のような区切り行を1行だけ挿入する
- *   (A〜S列を結合し、背景色と太字で装飾)。区切り行は常に1行のみで、新しいファイルを
+ *   (A〜X列を結合し、背景色と太字で装飾)。区切り行は常に1行のみで、新しいファイルを
  *   取り込むたびに削除・再算出・再挿入されるため、複数の区切り行が並んだりソート後に
  *   末尾へ移動したりすることはない。
  */
@@ -153,8 +153,8 @@ function appendFileToTargetSheet_(file, targetSheet) {
 /**
  * 対象シートのヘッダー行(1行目)に、渡された列名のうち未登録のものを追加する。
  * ヘッダーが空の場合は「取込日時」「元ファイル名」から作成する。
- * MAX_DATA_COLUMNS(既定: 19列目 = S列)に達している場合、それ以降の新規列は追加しない
- * (T列以降は転記対象外のため)。
+ * MAX_DATA_COLUMNS(既定: 24列目 = X列)に達している場合、それ以降の新規列は追加しない
+ * (Y列以降は転記対象外のため)。
  * 戻り値: { 列名: 列番号(1始まり) } のマップ
  */
 function ensureColumnsExist_(targetSheet, headerNames) {
@@ -236,7 +236,7 @@ function buildPeriodSeparatorRow_(periodValue, totalCols) {
 }
 
 /**
- * 区切り行をA列からPERIOD_SEPARATOR_MERGE_COLUMNS列目(既定: S列)まで結合し、
+ * 区切り行をA列からPERIOD_SEPARATOR_MERGE_COLUMNS列目(既定: X列)まで結合し、
  * 背景色(PERIOD_SEPARATOR_BACKGROUND_COLOR)と太字で装飾する。
  * データ列数(totalCols)がPERIOD_SEPARATOR_MERGE_COLUMNS未満でも結合できるよう、
  * 事前にシートの列数を必要分だけ拡張する。この処理は指定した1行のみに閉じており、
