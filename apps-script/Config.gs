@@ -64,5 +64,13 @@ const CONFIG = {
   // 1回の編集イベントで処理する最大行数（大量範囲貼り付け時のタイムアウト防止）
   EDIT_MAX_ROWS_PER_EVENT: 200,
   // ステータス変更履歴の記録先シート名
-  STATUS_HISTORY_SHEET_NAME: '週次ステータス変更履歴'
+  STATUS_HISTORY_SHEET_NAME: '週次ステータス変更履歴',
+
+  // ===== 「週次ステータス変更履歴」の案件名ハイパーリンク =====
+  // 「今月」タブのこの列(既定: H列)には、案件名テキストにURLへのハイパーリンクが
+  // 設定されている。同じテキスト+リンクを「週次ステータス変更履歴」の
+  // STATUS_HISTORY_PROJECT_COLUMNへ自動でコピーする。
+  EDIT_URL_COLUMN: 8,
+  // 「週次ステータス変更履歴」側で案件名+ハイパーリンクを表示する列（既定: 3列目 = C列）
+  STATUS_HISTORY_PROJECT_COLUMN: 3
 };
