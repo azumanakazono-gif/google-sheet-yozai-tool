@@ -7,6 +7,8 @@
  *   標準ZIPではない(HTMLテーブル等)」出力にも対応するため、先頭バイトで実体を判別し、
  *   ZIP/.xlsx・HTMLテーブルの2通りの読み取り方法へ自動でフォールバックする。
  * - 列はヘッダー名でマッチングして書き込むため、ANDPAD側の列順変更や列追加（フォーマットの揺れ）に強い。
+ * - 取り込みファイル名(例: 報告一覧_20260720_20260726.xlsx)または取り込みデータ内の
+ *   「報告日/日付」列の最小値・最大値から「対象期間」を自動判定し、「週次報告記録」に記録する。
  * - 転記済みファイルは「処理済み」フォルダへ移動し、同名ファイルがあればリネームして衝突を回避する。
  * - 万一の移動失敗に備え、処理済みファイルIDをプロパティに記録し、再走時の二重追記を防ぐ。
  */
@@ -78,6 +80,7 @@ function syncWeeklyReports() {
 /**
  * 1ファイル分のデータを読み取り、対象シートの末尾に追記する。
  * 列はヘッダー名でマッチングするため、ANDPAD側の列順・列追加の揺れを吸収する。
+ * 「対象期間」列には、ファイル名または取り込みデータの日付列から判定した期間を書き込む。
  */
 function appendFileToTargetSheet_(file, targetSheet) {
   const mimeType = file.getMimeType();
@@ -110,14 +113,18 @@ function appendFileToTargetSheet_(file, targetSheet) {
     return;
   }
 
-  const headerMap = ensureColumnsExist_(targetSheet, sourceHeader);
+  const headerMap = ensureColumnsExist_(targetSheet, [CONFIG.PERIOD_COLUMN_NAME].concat(sourceHeader));
   const totalCols = targetSheet.getLastColumn();
   const timestamp = new Date();
+  const periodValue = computeTargetPeriod_(file.getName(), sourceHeader, dataRows);
 
   const rowsToAppend = dataRows.map(function (row) {
     const outRow = new Array(totalCols).fill('');
     outRow[headerMap['取込日時'] - 1] = timestamp;
     outRow[headerMap['元ファイル名'] - 1] = file.getName();
+    if (headerMap[CONFIG.PERIOD_COLUMN_NAME]) {
+      outRow[headerMap[CONFIG.PERIOD_COLUMN_NAME] - 1] = periodValue;
+    }
     sourceHeader.forEach(function (colName, idx) {
       if (!colName) return;
       const col = headerMap[colName];
@@ -161,6 +168,99 @@ function ensureColumnsExist_(targetSheet, headerNames) {
   const map = {};
   existing.forEach(function (name, idx) { map[name] = idx + 1; });
   return map;
+}
+
+// ===== 対象期間の自動判定 =====
+
+/**
+ * ファイル名(例: 報告一覧_20260720_20260726.xlsx)、または取り込みデータ内の日付列から
+ * 対象期間を判定し、「2026/07/20 〜 2026/07/26」形式の文字列で返す。
+ * どちらからも判定できない場合は空文字を返す。
+ */
+function computeTargetPeriod_(fileName, sourceHeader, dataRows) {
+  const fromFileName = extractPeriodFromFileName_(fileName);
+  if (fromFileName) return fromFileName;
+  return extractPeriodFromDataRows_(sourceHeader, dataRows);
+}
+
+/**
+ * ファイル名に含まれる2つの8桁日付(yyyyMMdd)から対象期間を判定する。
+ * 例: 報告一覧_20260720_20260726.xlsx → 2026/07/20 〜 2026/07/26
+ */
+function extractPeriodFromFileName_(fileName) {
+  const base = String(fileName).replace(/\.[^.]+$/, '');
+  const match = base.match(/(\d{4})(\d{2})(\d{2}).*?(\d{4})(\d{2})(\d{2})/);
+  if (!match) return '';
+
+  const start = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  const end = new Date(Number(match[4]), Number(match[5]) - 1, Number(match[6]));
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) return '';
+
+  return formatPeriod_(start, end);
+}
+
+/**
+ * 取り込みデータの中から「報告日」「日付」等の列(PERIOD_DATE_COLUMN_CANDIDATES)を探し、
+ * その列の最小値・最大値から対象期間を判定する。
+ */
+function extractPeriodFromDataRows_(sourceHeader, dataRows) {
+  let colIdx = -1;
+  for (let i = 0; i < sourceHeader.length; i++) {
+    if (CONFIG.PERIOD_DATE_COLUMN_CANDIDATES.indexOf(sourceHeader[i]) !== -1) {
+      colIdx = i;
+      break;
+    }
+  }
+  if (colIdx === -1) return '';
+
+  let minDate = null;
+  let maxDate = null;
+  dataRows.forEach(function (row) {
+    const date = toDateValue_(row[colIdx]);
+    if (!date) return;
+    if (!minDate || date.getTime() < minDate.getTime()) minDate = date;
+    if (!maxDate || date.getTime() > maxDate.getTime()) maxDate = date;
+  });
+
+  if (!minDate || !maxDate) return '';
+  return formatPeriod_(minDate, maxDate);
+}
+
+/**
+ * セルの値(Date/Excelシリアル値/文字列)をDateに変換する。変換できない場合はnullを返す。
+ */
+function toDateValue_(value) {
+  if (value instanceof Date) {
+    return isNaN(value.getTime()) ? null : value;
+  }
+  if (typeof value === 'number') {
+    // Excelのシリアル値(1899-12-30起点)をDateに変換する。極端な値は日付列とみなさない。
+    if (value <= 0 || value > 100000) return null;
+    const epoch = Date.UTC(1899, 11, 30);
+    const date = new Date(epoch + value * 86400000);
+    return isNaN(date.getTime()) ? null : date;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed === '') return null;
+    const match = trimmed.match(/^(\d{4})[\/\-年](\d{1,2})[\/\-月](\d{1,2})/);
+    if (match) {
+      const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+      return isNaN(date.getTime()) ? null : date;
+    }
+    const parsed = new Date(trimmed);
+    return isNaN(parsed.getTime()) ? null : parsed;
+  }
+  return null;
+}
+
+/**
+ * 開始日・終了日を「yyyy/MM/dd 〜 yyyy/MM/dd」形式の文字列にする。
+ */
+function formatPeriod_(start, end) {
+  const from = Utilities.formatDate(start, CONFIG.TIME_ZONE, 'yyyy/MM/dd');
+  const to = Utilities.formatDate(end, CONFIG.TIME_ZONE, 'yyyy/MM/dd');
+  return from + ' 〜 ' + to;
 }
 
 /**

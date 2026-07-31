@@ -8,14 +8,21 @@
  *   標準ZIPではない(HTMLテーブル等)」出力にも対応するため、先頭バイトで実体を判別し、
  *   ZIP/.xlsx・HTMLテーブルの2通りの読み取り方法へ自動でフォールバックする。
  * - 列はヘッダー名でマッチングするため、ANDPAD側の列順変更や列追加に強い。
+ * - 取り込みファイル名(例: 報告一覧_20260720_20260726.xlsx)または取り込みデータ内の
+ *   「報告日/日付」列の最小値・最大値から「対象期間」を自動判定し、「週次報告記録」に記録する。
  * - 転記済みファイルは「処理済み」フォルダへ移動し、同名ファイルがあればリネームして衝突を回避する。
  * - 万一の移動失敗に備え、処理済みファイルIDをスクリプトプロパティに記録し、再走時の二重追記を防ぐ。
+ * - 「今月」を含むシート名の5行目以降・O列(見込確度)の編集を検知し、「週次報告記録」と
+ *   「週次ステータス変更履歴」へ自動転記する(onEdit)。この機能は、このスクリプトが
+ *   「31期予材リスト」のコンテナバインド型スクリプトとして設置されている場合のみ動作する。
  *
  * 事前準備:
  *   1. appsscript.json の内容をマニフェストに反映する（エディタで「"appsscript.json"
  *      マニフェスト ファイルをエディタで表示する」を有効にすると編集できる）。
  *      GASの「サービス」から何かを追加する必要はない。
  *   2. このファイルの内容を「コード.gs」に丸ごと貼り付ける（既存の中身は全削除してから貼り付けること）。
+ *      貼り付け後は Ctrl+End (Mac: Cmd+End) でファイル末尾に移動し、最後の "}" の後に
+ *      余分な文字が残っていないことを目視確認する。
  */
 
 // ===== 設定値 =====
@@ -41,10 +48,32 @@ const CONFIG = {
   TIME_ZONE: 'Asia/Tokyo',
 
   // 処理済みファイルIDを記録しておく数（moveTo失敗時などの二重処理を防ぐ保険）
-  PROCESSED_LOG_MAX: 300
+  PROCESSED_LOG_MAX: 300,
+
+  // ===== 対象期間の自動判定 =====
+  // 「週次報告記録」に追加する対象期間列の名前
+  PERIOD_COLUMN_NAME: '対象期間',
+  // ファイル名から日付が拾えなかった場合に、取り込みデータの中から探す列名の候補
+  PERIOD_DATE_COLUMN_CANDIDATES: ['報告日', '日付', '対象日', '実施日', '報告日時', '登録日'],
+
+  // ===== 編集時トリガー(onEdit)設定 =====
+  // シート名にこの文字列を含む場合のみ編集を監視する
+  EDIT_SHEET_NAME_KEYWORD: '今月',
+  // 監視対象の開始行（この行以降の編集のみを対象にする。見出し・集計行等を除外するため）
+  EDIT_MIN_ROW: 5,
+  // 監視対象の列（既定: O列 = 15列目, 見込確度）
+  EDIT_TARGET_COLUMN: 15,
+  // 「今月」シート側のヘッダー行番号（列名マッチングに使用。実際のシート構成に合わせて調整すること）
+  EDIT_HEADER_ROW: 4,
+  // 識別情報として転記する列数（1列目からこの列数まで。案件名・得意先名などの識別列を想定）
+  EDIT_IDENTIFIER_COLUMN_COUNT: 14,
+  // 1回の編集イベントで処理する最大行数（大量範囲貼り付け時のタイムアウト防止）
+  EDIT_MAX_ROWS_PER_EVENT: 200,
+  // ステータス変更履歴の記録先シート名
+  STATUS_HISTORY_SHEET_NAME: '週次ステータス変更履歴'
 };
 
-// ===== メイン処理 =====
+// ===== メイン処理 (週次自動転記) =====
 
 function syncWeeklyReports() {
   const lock = LockService.getScriptLock();
@@ -114,6 +143,7 @@ function syncWeeklyReports() {
 /**
  * 1ファイル分のデータを読み取り、対象シートの末尾に追記する。
  * 列はヘッダー名でマッチングするため、ANDPAD側の列順・列追加の揺れを吸収する。
+ * 「対象期間」列には、ファイル名または取り込みデータの日付列から判定した期間を書き込む。
  */
 function appendFileToTargetSheet_(file, targetSheet) {
   const mimeType = file.getMimeType();
@@ -146,14 +176,18 @@ function appendFileToTargetSheet_(file, targetSheet) {
     return;
   }
 
-  const headerMap = ensureColumnsExist_(targetSheet, sourceHeader);
+  const headerMap = ensureColumnsExist_(targetSheet, [CONFIG.PERIOD_COLUMN_NAME].concat(sourceHeader));
   const totalCols = targetSheet.getLastColumn();
   const timestamp = new Date();
+  const periodValue = computeTargetPeriod_(file.getName(), sourceHeader, dataRows);
 
   const rowsToAppend = dataRows.map(function (row) {
     const outRow = new Array(totalCols).fill('');
     outRow[headerMap['取込日時'] - 1] = timestamp;
     outRow[headerMap['元ファイル名'] - 1] = file.getName();
+    if (headerMap[CONFIG.PERIOD_COLUMN_NAME]) {
+      outRow[headerMap[CONFIG.PERIOD_COLUMN_NAME] - 1] = periodValue;
+    }
     sourceHeader.forEach(function (colName, idx) {
       if (!colName) return;
       const col = headerMap[colName];
@@ -197,6 +231,99 @@ function ensureColumnsExist_(targetSheet, headerNames) {
   const map = {};
   existing.forEach(function (name, idx) { map[name] = idx + 1; });
   return map;
+}
+
+// ===== 対象期間の自動判定 =====
+
+/**
+ * ファイル名(例: 報告一覧_20260720_20260726.xlsx)、または取り込みデータ内の日付列から
+ * 対象期間を判定し、「2026/07/20 〜 2026/07/26」形式の文字列で返す。
+ * どちらからも判定できない場合は空文字を返す。
+ */
+function computeTargetPeriod_(fileName, sourceHeader, dataRows) {
+  const fromFileName = extractPeriodFromFileName_(fileName);
+  if (fromFileName) return fromFileName;
+  return extractPeriodFromDataRows_(sourceHeader, dataRows);
+}
+
+/**
+ * ファイル名に含まれる2つの8桁日付(yyyyMMdd)から対象期間を判定する。
+ * 例: 報告一覧_20260720_20260726.xlsx → 2026/07/20 〜 2026/07/26
+ */
+function extractPeriodFromFileName_(fileName) {
+  const base = String(fileName).replace(/\.[^.]+$/, '');
+  const match = base.match(/(\d{4})(\d{2})(\d{2}).*?(\d{4})(\d{2})(\d{2})/);
+  if (!match) return '';
+
+  const start = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  const end = new Date(Number(match[4]), Number(match[5]) - 1, Number(match[6]));
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) return '';
+
+  return formatPeriod_(start, end);
+}
+
+/**
+ * 取り込みデータの中から「報告日」「日付」等の列(PERIOD_DATE_COLUMN_CANDIDATES)を探し、
+ * その列の最小値・最大値から対象期間を判定する。
+ */
+function extractPeriodFromDataRows_(sourceHeader, dataRows) {
+  let colIdx = -1;
+  for (let i = 0; i < sourceHeader.length; i++) {
+    if (CONFIG.PERIOD_DATE_COLUMN_CANDIDATES.indexOf(sourceHeader[i]) !== -1) {
+      colIdx = i;
+      break;
+    }
+  }
+  if (colIdx === -1) return '';
+
+  let minDate = null;
+  let maxDate = null;
+  dataRows.forEach(function (row) {
+    const date = toDateValue_(row[colIdx]);
+    if (!date) return;
+    if (!minDate || date.getTime() < minDate.getTime()) minDate = date;
+    if (!maxDate || date.getTime() > maxDate.getTime()) maxDate = date;
+  });
+
+  if (!minDate || !maxDate) return '';
+  return formatPeriod_(minDate, maxDate);
+}
+
+/**
+ * セルの値(Date/Excelシリアル値/文字列)をDateに変換する。変換できない場合はnullを返す。
+ */
+function toDateValue_(value) {
+  if (value instanceof Date) {
+    return isNaN(value.getTime()) ? null : value;
+  }
+  if (typeof value === 'number') {
+    // Excelのシリアル値(1899-12-30起点)をDateに変換する。極端な値は日付列とみなさない。
+    if (value <= 0 || value > 100000) return null;
+    const epoch = Date.UTC(1899, 11, 30);
+    const date = new Date(epoch + value * 86400000);
+    return isNaN(date.getTime()) ? null : date;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed === '') return null;
+    const match = trimmed.match(/^(\d{4})[\/\-年](\d{1,2})[\/\-月](\d{1,2})/);
+    if (match) {
+      const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+      return isNaN(date.getTime()) ? null : date;
+    }
+    const parsed = new Date(trimmed);
+    return isNaN(parsed.getTime()) ? null : parsed;
+  }
+  return null;
+}
+
+/**
+ * 開始日・終了日を「yyyy/MM/dd 〜 yyyy/MM/dd」形式の文字列にする。
+ */
+function formatPeriod_(start, end) {
+  const from = Utilities.formatDate(start, CONFIG.TIME_ZONE, 'yyyy/MM/dd');
+  const to = Utilities.formatDate(end, CONFIG.TIME_ZONE, 'yyyy/MM/dd');
+  return from + ' 〜 ' + to;
 }
 
 /**
@@ -568,12 +695,181 @@ function getTargetSheet_() {
   return sheet;
 }
 
+// ===== 編集時トリガー (onEdit) =====
+
+/**
+ * シンプルトリガー。関数名onEditはGASにおいて特別な意味を持ち、インストール操作なしで
+ * このスプレッドシートが編集されるたびに自動実行される(手動実行や権限承認は不要)。
+ * 動作するのは、このスクリプトが「31期予材リスト」スプレッドシートの
+ * コンテナバインド型スクリプトとして設置されている場合のみ(スタンドアロン型では発火しない)。
+ * より強い権限(メール送信等)が必要な場合は installEditTrigger() でインストーラブル
+ * トリガーとして handleEdit_ を登録することもできる。
+ */
+function onEdit(e) {
+  try {
+    handleEdit_(e);
+  } catch (err) {
+    Logger.log('onEdit処理でエラーが発生しました: ' + err);
+  }
+}
+
+/**
+ * シート名に「今月」を含むシートの、EDIT_MIN_ROW行目以降・EDIT_TARGET_COLUMN列目
+ * (既定: O列=見込確度)の変更を検知し、「週次報告記録」と「週次ステータス変更履歴」の
+ * 両方へ自動転記する。範囲コピー&ペーストなど複数セル一括編集にも対応する。
+ */
+function handleEdit_(e) {
+  if (!e || !e.range) return;
+
+  const sheet = e.range.getSheet();
+  const sheetName = sheet.getName();
+  if (sheetName.indexOf(CONFIG.EDIT_SHEET_NAME_KEYWORD) === -1) return;
+
+  const range = e.range;
+  const firstRow = range.getRow();
+  const lastRow = firstRow + range.getNumRows() - 1;
+  const firstCol = range.getColumn();
+  const lastCol = firstCol + range.getNumColumns() - 1;
+
+  if (lastRow < CONFIG.EDIT_MIN_ROW) return;
+  if (CONFIG.EDIT_TARGET_COLUMN < firstCol || CONFIG.EDIT_TARGET_COLUMN > lastCol) return;
+
+  const isSingleCell = range.getNumRows() === 1 && range.getNumColumns() === 1;
+  const startRow = Math.max(firstRow, CONFIG.EDIT_MIN_ROW);
+  let endRow = lastRow;
+  if (endRow - startRow + 1 > CONFIG.EDIT_MAX_ROWS_PER_EVENT) {
+    endRow = startRow + CONFIG.EDIT_MAX_ROWS_PER_EVENT - 1;
+    Logger.log('編集行数が多いため、先頭' + CONFIG.EDIT_MAX_ROWS_PER_EVENT + '行のみ処理します。');
+  }
+
+  const editorEmail = getEditorEmail_(e);
+  const weeklySheet = getTargetSheet_();
+  const historySheet = getStatusHistorySheet_();
+
+  for (let row = startRow; row <= endRow; row++) {
+    const newValue = sheet.getRange(row, CONFIG.EDIT_TARGET_COLUMN).getValue();
+    const oldValue = isSingleCell ? e.oldValue : '';
+    if (isSingleCell && String(oldValue === undefined ? '' : oldValue) === String(newValue)) continue;
+
+    appendEditToWeeklyReport_(sheet, row, weeklySheet);
+    appendStatusHistory_(sheet, row, oldValue, newValue, editorEmail, historySheet);
+  }
+}
+
+/**
+ * 編集したユーザーのメールアドレスを可能な範囲で取得する。
+ * 権限設定によっては取得できないことがあるため、その場合は空文字を返す。
+ */
+function getEditorEmail_(e) {
+  try {
+    if (e.user && e.user.getEmail && e.user.getEmail()) return e.user.getEmail();
+  } catch (err) {
+    // メールアドレス取得不可(権限設定による)。空文字で続行する。
+  }
+  try {
+    return Session.getActiveUser().getEmail() || '';
+  } catch (err) {
+    return '';
+  }
+}
+
+/**
+ * 「今月」シートの1行分を、列名マッチングで「週次報告記録」シートへ追記する。
+ * ヘッダー行位置(CONFIG.EDIT_HEADER_ROW)は「今月」シートの実際のレイアウトに合わせて
+ * 調整すること(既定値: 4行目)。
+ */
+function appendEditToWeeklyReport_(sourceSheet, row, targetSheet) {
+  const lastCol = sourceSheet.getLastColumn();
+  const headerRow = sourceSheet.getRange(CONFIG.EDIT_HEADER_ROW, 1, 1, lastCol).getValues()[0];
+  const sourceHeader = headerRow.map(function (h) { return String(h).trim(); });
+  const rowValues = sourceSheet.getRange(row, 1, 1, lastCol).getValues()[0];
+
+  const headerMap = ensureColumnsExist_(targetSheet, [CONFIG.PERIOD_COLUMN_NAME].concat(sourceHeader));
+  const totalCols = targetSheet.getLastColumn();
+  const timestamp = new Date();
+  const today = Utilities.formatDate(timestamp, CONFIG.TIME_ZONE, 'yyyy/MM/dd');
+
+  const outRow = new Array(totalCols).fill('');
+  outRow[headerMap['取込日時'] - 1] = timestamp;
+  outRow[headerMap['元ファイル名'] - 1] = '(シート編集) ' + sourceSheet.getName();
+  if (headerMap[CONFIG.PERIOD_COLUMN_NAME]) {
+    outRow[headerMap[CONFIG.PERIOD_COLUMN_NAME] - 1] = today + ' 〜 ' + today;
+  }
+  sourceHeader.forEach(function (colName, idx) {
+    if (!colName) return;
+    const col = headerMap[colName];
+    if (col) outRow[col - 1] = rowValues[idx];
+  });
+
+  const lastRow = targetSheet.getLastRow();
+  targetSheet.getRange(lastRow + 1, 1, 1, totalCols).setValues([outRow]);
+}
+
+/**
+ * 「週次ステータス変更履歴」シートを取得する。存在しない場合は作成し、ヘッダーを設定する。
+ */
+function getStatusHistorySheet_() {
+  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  let sheet = ss.getSheetByName(CONFIG.STATUS_HISTORY_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(CONFIG.STATUS_HISTORY_SHEET_NAME);
+  }
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, 8).setValues([[
+      '変更日時', 'シート名', '行番号', '列名', '変更前', '変更後', '編集者', '識別情報'
+    ]]);
+  }
+  return sheet;
+}
+
+/**
+ * 見込確度などの変更を「週次ステータス変更履歴」に1行追記する。
+ * 識別情報には、対象行の1列目からEDIT_IDENTIFIER_COLUMN_COUNT列目までの値のうち
+ * 空でないものだけを" / "区切りで連結して記録する(案件名・得意先名などを想定)。
+ */
+function appendStatusHistory_(sourceSheet, row, oldValue, newValue, editorEmail, historySheet) {
+  const idCount = Math.min(CONFIG.EDIT_IDENTIFIER_COLUMN_COUNT, CONFIG.EDIT_TARGET_COLUMN - 1);
+  const idValues = idCount > 0 ? sourceSheet.getRange(row, 1, 1, idCount).getValues()[0] : [];
+  const identifier = idValues
+    .map(function (v) { return String(v).trim(); })
+    .filter(function (v) { return v !== ''; })
+    .join(' / ');
+
+  const columnName = getColumnHeaderName_(sourceSheet, CONFIG.EDIT_TARGET_COLUMN);
+
+  historySheet.appendRow([
+    new Date(),
+    sourceSheet.getName(),
+    row,
+    columnName,
+    oldValue,
+    newValue,
+    editorEmail,
+    identifier
+  ]);
+}
+
+/**
+ * 指定列のヘッダー名(EDIT_HEADER_ROW行目)を取得する。取得できない場合は「列N」を返す。
+ */
+function getColumnHeaderName_(sheet, col) {
+  try {
+    const value = sheet.getRange(CONFIG.EDIT_HEADER_ROW, col).getValue();
+    const name = String(value).trim();
+    return name !== '' ? name : ('列' + col);
+  } catch (err) {
+    return '列' + col;
+  }
+}
+
 // ===== トリガー設定 =====
 
 /**
  * 週次トリガーをスクリプトから設定したい場合に一度だけ実行する。
  * (GASエディタの「トリガー」画面から手動設定する場合はこの関数は不要)
  * 既存の syncWeeklyReports 用トリガーがあれば一旦削除してから作り直す。
+ * 毎週月曜日の午前6時〜7時の間に実行される（GASの時間主導型トリガーは実行時刻の厳密な
+ * 指定ができないため、atHour(6)で「6時〜7時の間のいずれかのタイミング」を指定する）。
  */
 function installWeeklyTrigger() {
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
@@ -586,6 +882,25 @@ function installWeeklyTrigger() {
     .timeBased()
     .onWeekDay(ScriptApp.WeekDay.MONDAY)
     .atHour(6)
+    .create();
+}
+
+/**
+ * onEdit(e)のシンプルトリガーではなく、handleEdit_をインストーラブルトリガーとして
+ * 登録したい場合に一度だけ実行する(任意)。インストーラブルトリガーは追加の権限承認が
+ * 必要になる代わりに、MailApp等の外部サービス呼び出しも可能になる。
+ * 既存の handleEdit_ 用トリガーがあれば一旦削除してから作り直す。
+ */
+function installEditTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (trigger) {
+    if (trigger.getHandlerFunction() === 'handleEdit_') {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+
+  ScriptApp.newTrigger('handleEdit_')
+    .forSpreadsheet(SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID))
+    .onEdit()
     .create();
 }
 
