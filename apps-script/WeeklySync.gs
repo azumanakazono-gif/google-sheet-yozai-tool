@@ -131,7 +131,7 @@ function appendFileToTargetSheet_(file, targetSheet) {
   }
 
   const headerMap = ensureColumnsExist_(targetSheet, sourceHeader);
-  const totalCols = targetSheet.getLastColumn();
+  const totalCols = Math.min(targetSheet.getLastColumn(), CONFIG.MAX_DATA_COLUMNS);
   const timestamp = new Date();
 
   const rowsToAppend = dataRows.map(function (row) {
@@ -141,7 +141,7 @@ function appendFileToTargetSheet_(file, targetSheet) {
     sourceHeader.forEach(function (colName, idx) {
       if (!colName) return;
       const col = headerMap[colName];
-      if (col) outRow[col - 1] = row[idx];
+      if (col && col <= totalCols) outRow[col - 1] = row[idx];
     });
     return outRow;
   });
@@ -153,6 +153,8 @@ function appendFileToTargetSheet_(file, targetSheet) {
 /**
  * 対象シートのヘッダー行(1行目)に、渡された列名のうち未登録のものを追加する。
  * ヘッダーが空の場合は「取込日時」「元ファイル名」から作成する。
+ * MAX_DATA_COLUMNS(既定: 19列目 = S列)に達している場合、それ以降の新規列は追加しない
+ * (T列以降は転記対象外のため)。
  * 戻り値: { 列名: 列番号(1始まり) } のマップ
  */
 function ensureColumnsExist_(targetSheet, headerNames) {
@@ -166,6 +168,7 @@ function ensureColumnsExist_(targetSheet, headerNames) {
 
   let changed = existing.length !== headerRow.length;
   headerNames.forEach(function (name) {
+    if (existing.length >= CONFIG.MAX_DATA_COLUMNS) return;
     const trimmed = String(name).trim();
     if (trimmed === '') return;
     if (existing.indexOf(trimmed) === -1) {

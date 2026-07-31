@@ -127,6 +127,7 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 - `Config.gs` の `NOTIFY_EMAIL` にメールアドレスを設定すると、処理失敗時のみ通知メールが届く。
 - 処理済みファイルIDの記録（スクリプトプロパティ `PROCESSED_FILE_IDS`）は直近 `PROCESSED_LOG_MAX` 件のみ保持する。件数を増減したい場合は `Config.gs` を編集する。
 - 報告日順ソート・対象期間の算出に使う列名の候補とフォールバック列番号は `Config.gs` の `REPORT_DATE_COLUMN_CANDIDATES` / `REPORT_DATE_FALLBACK_COLUMN` で変更できる。区切り行のラベル文言は `PERIOD_SEPARATOR_PREFIX` / `PERIOD_SEPARATOR_SUFFIX` / `PERIOD_UNKNOWN_LABEL`、結合列数・背景色は `PERIOD_SEPARATOR_MERGE_COLUMNS` / `PERIOD_SEPARATOR_BACKGROUND_COLOR` で変更できる。
+- 「週次報告記録」シートへ転記する列数の上限は `Config.gs` の `MAX_DATA_COLUMNS`（既定: 19列目 = S列）。**T列(20列目)以降は転記対象外**で、ヘッダー追加・値の書き込みのどちらも行われない（`ensureColumnsExist_` / `appendFileToTargetSheet_` / `appendEditToWeeklyReport_` で共通して適用）。転記したい列を増やしたい場合はこの値を変更する。
 - 編集時トリガーの監視条件（シート名キーワード・開始行・対象列・ヘッダー行・識別列数・1回あたりの最大処理行数・ステータス変更履歴シート名）はすべて `Config.gs` の `EDIT_SHEET_NAME_KEYWORD` / `EDIT_MIN_ROW` / `EDIT_TARGET_COLUMN` / `EDIT_HEADER_ROW` / `EDIT_IDENTIFIER_COLUMN_COUNT` / `EDIT_MAX_ROWS_PER_EVENT` / `STATUS_HISTORY_SHEET_NAME` で変更できる。
 
 ## トラブルシューティング

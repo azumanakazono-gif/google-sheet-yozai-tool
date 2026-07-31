@@ -95,7 +95,7 @@ function appendEditToWeeklyReport_(sourceSheet, row, targetSheet) {
   const rowValues = sourceSheet.getRange(row, 1, 1, lastCol).getValues()[0];
 
   const headerMap = ensureColumnsExist_(targetSheet, sourceHeader);
-  const totalCols = targetSheet.getLastColumn();
+  const totalCols = Math.min(targetSheet.getLastColumn(), CONFIG.MAX_DATA_COLUMNS);
   const timestamp = new Date();
 
   const outRow = new Array(totalCols).fill('');
@@ -104,7 +104,7 @@ function appendEditToWeeklyReport_(sourceSheet, row, targetSheet) {
   sourceHeader.forEach(function (colName, idx) {
     if (!colName) return;
     const col = headerMap[colName];
-    if (col) outRow[col - 1] = rowValues[idx];
+    if (col && col <= totalCols) outRow[col - 1] = rowValues[idx];
   });
 
   const lastRow = targetSheet.getLastRow();
