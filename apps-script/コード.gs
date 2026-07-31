@@ -13,11 +13,12 @@
  * - syncWeeklyReportsの最後に、「週次報告記録」を「報告日」列(ヘッダー名で検出、見つからない
  *   場合はI列=9列目)で昇順ソートする。そのうえで、シート全体のデータから対象期間(最小の
  *   報告日〜最大の報告日。報告日列が判定できない場合は「元ファイル名」列に含まれる日付から
- *   フォールバック)を算出し、その開始日・終了日をそれぞれが属する週の月曜日・日曜日まで
- *   拡張したうえで、「2行目」に「【対象期間：2026/07/27 〜 2026/08/02】」のような区切り行を
- *   1行だけ挿入する(A〜S列を結合し、背景色と太字で装飾)。区切り行は常に1行のみで、新しい
- *   ファイルを取り込むたびに削除・再算出・再挿入されるため、複数の区切り行が並んだり
- *   ソート後に末尾へ移動したりすることはない。
+ *   フォールバック)を算出し、毎週金曜日に報告を締める運用にあわせて、その開始日・終了日を
+ *   それぞれが属する「土曜日始まり・金曜日終わり」の週の土曜日・金曜日まで拡張したうえで、
+ *   「2行目」に「【対象期間：2026/07/25 〜 2026/07/31】」のような区切り行を1行だけ挿入する
+ *   (A〜S列を結合し、背景色と太字で装飾)。区切り行は常に1行のみで、新しいファイルを
+ *   取り込むたびに削除・再算出・再挿入されるため、複数の区切り行が並んだりソート後に
+ *   末尾へ移動したりすることはない。
  * - 「今月」を含むシート名の5行目以降・O列(見込確度)の編集を検知し、「週次報告記録」と
  *   「週次ステータス変更履歴」へ自動転記する(onEdit)。この機能は、このスクリプトが
  *   「31期予材リスト」のコンテナバインド型スクリプトとして設置されている場合のみ動作する。
@@ -424,33 +425,34 @@ function insertPeriodSummaryRow_(targetSheet) {
  * まず「報告日」列(resolveReportDateColumn_)の値から最小値・最大値を求め、判定できない
  * 場合は「元ファイル名」列に含まれる日付(ファイル名パターン)からフォールバックする。
  * どちらからも判定できない場合は空文字を返す。
- * 開始日・終了日はそれぞれの日付が属する週の月曜日・日曜日まで拡張する
- * (例: データが2026/07/28〜2026/07/30なら「2026/07/27 〜 2026/08/02」)。
+ * 毎週金曜日に報告を締める運用にあわせ、開始日・終了日はそれぞれの日付が属する
+ * 「土曜日始まり・金曜日終わり」の週の土曜日・金曜日まで拡張する
+ * (例: データが2026/07/28〜2026/07/30なら「2026/07/25 〜 2026/07/31」)。
  */
 function computeOverallPeriodLabel_(targetSheet, contentLastCol, lastRow) {
   const dateColumn = resolveReportDateColumn_(targetSheet, contentLastCol);
   const range = extractDateRangeFromColumn_(targetSheet, dateColumn, lastRow)
     || extractDateRangeFromFileNameColumn_(targetSheet, contentLastCol, lastRow);
   if (!range) return '';
-  return formatPeriod_(getMondayOfWeek_(range.min), getSundayOfWeek_(range.max));
+  return formatPeriod_(getSaturdayOfWeek_(range.min), getFridayOfWeek_(range.max));
 }
 
 /**
- * 指定日を含む週(月曜始まり)の月曜日を返す。
+ * 指定日を含む週(土曜始まり・金曜終わり)の土曜日を返す。
  */
-function getMondayOfWeek_(date) {
+function getSaturdayOfWeek_(date) {
   const day = date.getDay(); // 0=日,1=月,2=火,...,6=土
-  const diffToMonday = (day + 6) % 7;
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate() - diffToMonday);
+  const diffToSaturday = (day + 1) % 7;
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() - diffToSaturday);
 }
 
 /**
- * 指定日を含む週(月曜始まり)の日曜日を返す。
+ * 指定日を含む週(土曜始まり・金曜終わり)の金曜日を返す。
  */
-function getSundayOfWeek_(date) {
+function getFridayOfWeek_(date) {
   const day = date.getDay(); // 0=日,1=月,2=火,...,6=土
-  const diffToSunday = (7 - day) % 7;
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + diffToSunday);
+  const diffToFriday = (12 - day) % 7;
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + diffToFriday);
 }
 
 /**
