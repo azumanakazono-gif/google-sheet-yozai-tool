@@ -35,6 +35,10 @@ const CONFIG = {
   PERIOD_UNKNOWN_LABEL: '不明',
   // ファイル名から日付が拾えなかった場合に、取り込みデータの中から探す列名の候補
   PERIOD_DATE_COLUMN_CANDIDATES: ['報告日', '日付', '対象日', '実施日', '報告日時', '登録日'],
+  // 区切り行をA列からこの列数まで結合する（既定: 19列目 = S列）
+  PERIOD_SEPARATOR_MERGE_COLUMNS: 19,
+  // 区切り行の背景色
+  PERIOD_SEPARATOR_BACKGROUND_COLOR: '#f3f3f3',
 
   // ===== 編集時トリガー(onEdit)設定 =====
   // シート名にこの文字列を含む場合のみ編集を監視する

@@ -47,6 +47,8 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 | --- | --- |
 | `【対象期間：2026/07/20 〜 2026/07/26】` | (すべて空欄) |
 
+区切り行は見出しとして視認しやすいよう、**A列からS列(19列目)までをセル結合**し、**背景色**（既定: `#f3f3f3`、`Config.gs` の `PERIOD_SEPARATOR_BACKGROUND_COLOR`）と**太字**で装飾される。結合・装飾はこの区切り行1行にのみ適用され、データ行の書き込み列数（`appendFileToTargetSheet_` が計算する列数）には影響しない。結合に必要な列数がシートに無い場合は自動で列を追加する。結合する列数は `Config.gs` の `PERIOD_SEPARATOR_MERGE_COLUMNS` で変更できる。
+
 対象期間そのものは、以下の優先順で判定する。
 
 1. **ファイル名から判定**: ANDPAD等の出力ファイル名に含まれる2つの8桁日付(`yyyyMMdd`)を拾う。例: `報告一覧_20260720_20260726.xlsx` → `2026/07/20 〜 2026/07/26`。
@@ -122,7 +124,7 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 - `Config.gs` の `SOURCE_HAS_HEADER` が `false` の場合は「列1」「列2」...という仮のヘッダー名で取り込む（フォーマット変動への耐性は下がる）。
 - `Config.gs` の `NOTIFY_EMAIL` にメールアドレスを設定すると、処理失敗時のみ通知メールが届く。
 - 処理済みファイルIDの記録（スクリプトプロパティ `PROCESSED_FILE_IDS`）は直近 `PROCESSED_LOG_MAX` 件のみ保持する。件数を増減したい場合は `Config.gs` を編集する。
-- 対象期間の判定対象になる日付列名は `Config.gs` の `PERIOD_DATE_COLUMN_CANDIDATES`、区切り行のラベル文言は `PERIOD_SEPARATOR_PREFIX` / `PERIOD_SEPARATOR_SUFFIX` / `PERIOD_UNKNOWN_LABEL` で変更できる。
+- 対象期間の判定対象になる日付列名は `Config.gs` の `PERIOD_DATE_COLUMN_CANDIDATES`、区切り行のラベル文言は `PERIOD_SEPARATOR_PREFIX` / `PERIOD_SEPARATOR_SUFFIX` / `PERIOD_UNKNOWN_LABEL`、区切り行の結合列数・背景色は `PERIOD_SEPARATOR_MERGE_COLUMNS` / `PERIOD_SEPARATOR_BACKGROUND_COLOR` で変更できる。
 - 編集時トリガーの監視条件（シート名キーワード・開始行・対象列・ヘッダー行・識別列数・1回あたりの最大処理行数・ステータス変更履歴シート名）はすべて `Config.gs` の `EDIT_SHEET_NAME_KEYWORD` / `EDIT_MIN_ROW` / `EDIT_TARGET_COLUMN` / `EDIT_HEADER_ROW` / `EDIT_IDENTIFIER_COLUMN_COUNT` / `EDIT_MAX_ROWS_PER_EVENT` / `STATUS_HISTORY_SHEET_NAME` で変更できる。
 
 ## トラブルシューティング

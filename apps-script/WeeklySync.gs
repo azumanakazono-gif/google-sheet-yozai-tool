@@ -10,7 +10,8 @@
  * - 取り込みファイル名(例: 報告一覧_20260720_20260726.xlsx)または取り込みデータ内の
  *   「報告日/日付」列の最小値・最大値から「対象期間」を自動判定し、データ列としてではなく
  *   データ群先頭の区切り行(A列に「【対象期間：2026/07/20 〜 2026/07/26】」、B列以降は空欄)
- *   として「週次報告記録」に挿入する。
+ *   として「週次報告記録」に挿入する。区切り行はA〜S列(19列目まで)を結合し、背景色と
+ *   太字で装飾する。
  * - 転記済みファイルは「処理済み」フォルダへ移動し、同名ファイルがあればリネームして衝突を回避する。
  * - 万一の移動失敗に備え、処理済みファイルIDをプロパティに記録し、再走時の二重追記を防ぐ。
  */
@@ -83,7 +84,8 @@ function syncWeeklyReports() {
  * 1ファイル分のデータを読み取り、対象シートの末尾に追記する。
  * 列はヘッダー名でマッチングするため、ANDPAD側の列順・列追加の揺れを吸収する。
  * 対象期間はデータ列には書き込まず、データ行群の先頭に区切り行として1行挿入する
- * （A列:「【対象期間：yyyy/MM/dd 〜 yyyy/MM/dd】」、B列以降は空欄）。
+ * （A列:「【対象期間：yyyy/MM/dd 〜 yyyy/MM/dd】」、B列以降は空欄。A〜S列を結合し、
+ * 背景色と太字で見出しらしく装飾する）。
  */
 function appendFileToTargetSheet_(file, targetSheet) {
   const mimeType = file.getMimeType();
@@ -136,7 +138,11 @@ function appendFileToTargetSheet_(file, targetSheet) {
   const rowsToAppend = [buildPeriodSeparatorRow_(periodValue, totalCols)].concat(dataRowsOut);
 
   const lastRow = targetSheet.getLastRow();
-  targetSheet.getRange(lastRow + 1, 1, rowsToAppend.length, totalCols).setValues(rowsToAppend);
+  const separatorRowNumber = lastRow + 1;
+  targetSheet.getRange(separatorRowNumber, 1, rowsToAppend.length, totalCols).setValues(rowsToAppend);
+  // 区切り行(先頭行)だけをA〜S列で結合・装飾する。totalColsの実際の値には依存しないため、
+  // データ列の書き込み(上記setValues)には一切影響しない。
+  formatPeriodSeparatorRow_(targetSheet, separatorRowNumber);
 }
 
 /**
@@ -273,6 +279,33 @@ function buildPeriodSeparatorRow_(periodValue, totalCols) {
   const row = new Array(totalCols).fill('');
   row[0] = CONFIG.PERIOD_SEPARATOR_PREFIX + (periodValue || CONFIG.PERIOD_UNKNOWN_LABEL) + CONFIG.PERIOD_SEPARATOR_SUFFIX;
   return row;
+}
+
+/**
+ * 区切り行をA列からPERIOD_SEPARATOR_MERGE_COLUMNS列目(既定: S列)まで結合し、
+ * 背景色(PERIOD_SEPARATOR_BACKGROUND_COLOR)と太字で装飾する。
+ * データ列数(totalCols)がPERIOD_SEPARATOR_MERGE_COLUMNS未満でも結合できるよう、
+ * 事前にシートの列数を必要分だけ拡張する。この処理は指定した1行のみに閉じており、
+ * データの書き込み(setValues)には影響しない。
+ */
+function formatPeriodSeparatorRow_(targetSheet, rowNumber) {
+  const mergeCols = CONFIG.PERIOD_SEPARATOR_MERGE_COLUMNS;
+  ensureMinColumns_(targetSheet, mergeCols);
+
+  const range = targetSheet.getRange(rowNumber, 1, 1, mergeCols);
+  range.setBackground(CONFIG.PERIOD_SEPARATOR_BACKGROUND_COLOR);
+  range.setFontWeight('bold');
+  range.merge();
+}
+
+/**
+ * シートの列数がminColsに満たない場合、不足分の列を末尾に追加する。
+ */
+function ensureMinColumns_(sheet, minCols) {
+  const currentMax = sheet.getMaxColumns();
+  if (currentMax < minCols) {
+    sheet.insertColumnsAfter(currentMax, minCols - currentMax);
+  }
 }
 
 /**
