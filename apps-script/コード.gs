@@ -9,7 +9,9 @@
  *   ZIP/.xlsx・HTMLテーブルの2通りの読み取り方法へ自動でフォールバックする。
  * - 列はヘッダー名でマッチングするため、ANDPAD側の列順変更や列追加に強い。
  * - 取り込みファイル名(例: 報告一覧_20260720_20260726.xlsx)または取り込みデータ内の
- *   「報告日/日付」列の最小値・最大値から「対象期間」を自動判定し、「週次報告記録」に記録する。
+ *   「報告日/日付」列の最小値・最大値から「対象期間」を自動判定し、データ列としてではなく
+ *   データ群先頭の区切り行(A列に「【対象期間：2026/07/20 〜 2026/07/26】」、B列以降は空欄)
+ *   として「週次報告記録」に挿入する。
  * - 転記済みファイルは「処理済み」フォルダへ移動し、同名ファイルがあればリネームして衝突を回避する。
  * - 万一の移動失敗に備え、処理済みファイルIDをスクリプトプロパティに記録し、再走時の二重追記を防ぐ。
  * - 「今月」を含むシート名の5行目以降・O列(見込確度)の編集を検知し、「週次報告記録」と
@@ -51,8 +53,12 @@ const CONFIG = {
   PROCESSED_LOG_MAX: 300,
 
   // ===== 対象期間の自動判定 =====
-  // 「週次報告記録」に追加する対象期間列の名前
-  PERIOD_COLUMN_NAME: '対象期間',
+  // 対象期間はデータ列(J列等)には記録せず、データ群先頭の区切り行として挿入する。
+  // 区切り行のA列に入るラベルの接頭辞・接尾辞（例:「【対象期間：2026/07/20 〜 2026/07/26】」）
+  PERIOD_SEPARATOR_PREFIX: '【対象期間：',
+  PERIOD_SEPARATOR_SUFFIX: '】',
+  // 対象期間が判定できなかった場合に区切り行へ表示する文言
+  PERIOD_UNKNOWN_LABEL: '不明',
   // ファイル名から日付が拾えなかった場合に、取り込みデータの中から探す列名の候補
   PERIOD_DATE_COLUMN_CANDIDATES: ['報告日', '日付', '対象日', '実施日', '報告日時', '登録日'],
 
@@ -143,7 +149,8 @@ function syncWeeklyReports() {
 /**
  * 1ファイル分のデータを読み取り、対象シートの末尾に追記する。
  * 列はヘッダー名でマッチングするため、ANDPAD側の列順・列追加の揺れを吸収する。
- * 「対象期間」列には、ファイル名または取り込みデータの日付列から判定した期間を書き込む。
+ * 対象期間はデータ列には書き込まず、データ行群の先頭に区切り行として1行挿入する
+ * （A列:「【対象期間：yyyy/MM/dd 〜 yyyy/MM/dd】」、B列以降は空欄）。
  */
 function appendFileToTargetSheet_(file, targetSheet) {
   const mimeType = file.getMimeType();
@@ -176,18 +183,15 @@ function appendFileToTargetSheet_(file, targetSheet) {
     return;
   }
 
-  const headerMap = ensureColumnsExist_(targetSheet, [CONFIG.PERIOD_COLUMN_NAME].concat(sourceHeader));
+  const headerMap = ensureColumnsExist_(targetSheet, sourceHeader);
   const totalCols = targetSheet.getLastColumn();
   const timestamp = new Date();
   const periodValue = computeTargetPeriod_(file.getName(), sourceHeader, dataRows);
 
-  const rowsToAppend = dataRows.map(function (row) {
+  const dataRowsOut = dataRows.map(function (row) {
     const outRow = new Array(totalCols).fill('');
     outRow[headerMap['取込日時'] - 1] = timestamp;
     outRow[headerMap['元ファイル名'] - 1] = file.getName();
-    if (headerMap[CONFIG.PERIOD_COLUMN_NAME]) {
-      outRow[headerMap[CONFIG.PERIOD_COLUMN_NAME] - 1] = periodValue;
-    }
     sourceHeader.forEach(function (colName, idx) {
       if (!colName) return;
       const col = headerMap[colName];
@@ -195,6 +199,8 @@ function appendFileToTargetSheet_(file, targetSheet) {
     });
     return outRow;
   });
+
+  const rowsToAppend = [buildPeriodSeparatorRow_(periodValue, totalCols)].concat(dataRowsOut);
 
   const lastRow = targetSheet.getLastRow();
   targetSheet.getRange(lastRow + 1, 1, rowsToAppend.length, totalCols).setValues(rowsToAppend);
@@ -324,6 +330,16 @@ function formatPeriod_(start, end) {
   const from = Utilities.formatDate(start, CONFIG.TIME_ZONE, 'yyyy/MM/dd');
   const to = Utilities.formatDate(end, CONFIG.TIME_ZONE, 'yyyy/MM/dd');
   return from + ' 〜 ' + to;
+}
+
+/**
+ * 対象期間の区切り行を作る。A列に「【対象期間：yyyy/MM/dd 〜 yyyy/MM/dd】」を入れ、
+ * それ以外の列はすべて空欄にする。対象期間が判定できなかった場合はPERIOD_UNKNOWN_LABELを表示する。
+ */
+function buildPeriodSeparatorRow_(periodValue, totalCols) {
+  const row = new Array(totalCols).fill('');
+  row[0] = CONFIG.PERIOD_SEPARATOR_PREFIX + (periodValue || CONFIG.PERIOD_UNKNOWN_LABEL) + CONFIG.PERIOD_SEPARATOR_SUFFIX;
+  return row;
 }
 
 /**
@@ -784,17 +800,13 @@ function appendEditToWeeklyReport_(sourceSheet, row, targetSheet) {
   const sourceHeader = headerRow.map(function (h) { return String(h).trim(); });
   const rowValues = sourceSheet.getRange(row, 1, 1, lastCol).getValues()[0];
 
-  const headerMap = ensureColumnsExist_(targetSheet, [CONFIG.PERIOD_COLUMN_NAME].concat(sourceHeader));
+  const headerMap = ensureColumnsExist_(targetSheet, sourceHeader);
   const totalCols = targetSheet.getLastColumn();
   const timestamp = new Date();
-  const today = Utilities.formatDate(timestamp, CONFIG.TIME_ZONE, 'yyyy/MM/dd');
 
   const outRow = new Array(totalCols).fill('');
   outRow[headerMap['取込日時'] - 1] = timestamp;
   outRow[headerMap['元ファイル名'] - 1] = '(シート編集) ' + sourceSheet.getName();
-  if (headerMap[CONFIG.PERIOD_COLUMN_NAME]) {
-    outRow[headerMap[CONFIG.PERIOD_COLUMN_NAME] - 1] = today + ' 〜 ' + today;
-  }
   sourceHeader.forEach(function (colName, idx) {
     if (!colName) return;
     const col = headerMap[colName];

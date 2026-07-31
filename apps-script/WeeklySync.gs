@@ -8,7 +8,9 @@
  *   ZIP/.xlsx・HTMLテーブルの2通りの読み取り方法へ自動でフォールバックする。
  * - 列はヘッダー名でマッチングして書き込むため、ANDPAD側の列順変更や列追加（フォーマットの揺れ）に強い。
  * - 取り込みファイル名(例: 報告一覧_20260720_20260726.xlsx)または取り込みデータ内の
- *   「報告日/日付」列の最小値・最大値から「対象期間」を自動判定し、「週次報告記録」に記録する。
+ *   「報告日/日付」列の最小値・最大値から「対象期間」を自動判定し、データ列としてではなく
+ *   データ群先頭の区切り行(A列に「【対象期間：2026/07/20 〜 2026/07/26】」、B列以降は空欄)
+ *   として「週次報告記録」に挿入する。
  * - 転記済みファイルは「処理済み」フォルダへ移動し、同名ファイルがあればリネームして衝突を回避する。
  * - 万一の移動失敗に備え、処理済みファイルIDをプロパティに記録し、再走時の二重追記を防ぐ。
  */
@@ -80,7 +82,8 @@ function syncWeeklyReports() {
 /**
  * 1ファイル分のデータを読み取り、対象シートの末尾に追記する。
  * 列はヘッダー名でマッチングするため、ANDPAD側の列順・列追加の揺れを吸収する。
- * 「対象期間」列には、ファイル名または取り込みデータの日付列から判定した期間を書き込む。
+ * 対象期間はデータ列には書き込まず、データ行群の先頭に区切り行として1行挿入する
+ * （A列:「【対象期間：yyyy/MM/dd 〜 yyyy/MM/dd】」、B列以降は空欄）。
  */
 function appendFileToTargetSheet_(file, targetSheet) {
   const mimeType = file.getMimeType();
@@ -113,18 +116,15 @@ function appendFileToTargetSheet_(file, targetSheet) {
     return;
   }
 
-  const headerMap = ensureColumnsExist_(targetSheet, [CONFIG.PERIOD_COLUMN_NAME].concat(sourceHeader));
+  const headerMap = ensureColumnsExist_(targetSheet, sourceHeader);
   const totalCols = targetSheet.getLastColumn();
   const timestamp = new Date();
   const periodValue = computeTargetPeriod_(file.getName(), sourceHeader, dataRows);
 
-  const rowsToAppend = dataRows.map(function (row) {
+  const dataRowsOut = dataRows.map(function (row) {
     const outRow = new Array(totalCols).fill('');
     outRow[headerMap['取込日時'] - 1] = timestamp;
     outRow[headerMap['元ファイル名'] - 1] = file.getName();
-    if (headerMap[CONFIG.PERIOD_COLUMN_NAME]) {
-      outRow[headerMap[CONFIG.PERIOD_COLUMN_NAME] - 1] = periodValue;
-    }
     sourceHeader.forEach(function (colName, idx) {
       if (!colName) return;
       const col = headerMap[colName];
@@ -132,6 +132,8 @@ function appendFileToTargetSheet_(file, targetSheet) {
     });
     return outRow;
   });
+
+  const rowsToAppend = [buildPeriodSeparatorRow_(periodValue, totalCols)].concat(dataRowsOut);
 
   const lastRow = targetSheet.getLastRow();
   targetSheet.getRange(lastRow + 1, 1, rowsToAppend.length, totalCols).setValues(rowsToAppend);
@@ -261,6 +263,16 @@ function formatPeriod_(start, end) {
   const from = Utilities.formatDate(start, CONFIG.TIME_ZONE, 'yyyy/MM/dd');
   const to = Utilities.formatDate(end, CONFIG.TIME_ZONE, 'yyyy/MM/dd');
   return from + ' 〜 ' + to;
+}
+
+/**
+ * 対象期間の区切り行を作る。A列に「【対象期間：yyyy/MM/dd 〜 yyyy/MM/dd】」を入れ、
+ * それ以外の列はすべて空欄にする。対象期間が判定できなかった場合はPERIOD_UNKNOWN_LABELを表示する。
+ */
+function buildPeriodSeparatorRow_(periodValue, totalCols) {
+  const row = new Array(totalCols).fill('');
+  row[0] = CONFIG.PERIOD_SEPARATOR_PREFIX + (periodValue || CONFIG.PERIOD_UNKNOWN_LABEL) + CONFIG.PERIOD_SEPARATOR_SUFFIX;
+  return row;
 }
 
 /**

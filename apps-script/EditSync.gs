@@ -94,17 +94,13 @@ function appendEditToWeeklyReport_(sourceSheet, row, targetSheet) {
   const sourceHeader = headerRow.map(function (h) { return String(h).trim(); });
   const rowValues = sourceSheet.getRange(row, 1, 1, lastCol).getValues()[0];
 
-  const headerMap = ensureColumnsExist_(targetSheet, [CONFIG.PERIOD_COLUMN_NAME].concat(sourceHeader));
+  const headerMap = ensureColumnsExist_(targetSheet, sourceHeader);
   const totalCols = targetSheet.getLastColumn();
   const timestamp = new Date();
-  const today = Utilities.formatDate(timestamp, CONFIG.TIME_ZONE, 'yyyy/MM/dd');
 
   const outRow = new Array(totalCols).fill('');
   outRow[headerMap['取込日時'] - 1] = timestamp;
   outRow[headerMap['元ファイル名'] - 1] = '(シート編集) ' + sourceSheet.getName();
-  if (headerMap[CONFIG.PERIOD_COLUMN_NAME]) {
-    outRow[headerMap[CONFIG.PERIOD_COLUMN_NAME] - 1] = today + ' 〜 ' + today;
-  }
   sourceHeader.forEach(function (colName, idx) {
     if (!colName) return;
     const col = headerMap[colName];
