@@ -55,7 +55,7 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 
    算出した最小値・最大値はそのまま使わず、毎週金曜日に報告を締める運用にあわせて、**開始日はその日が属する週の土曜日まで遡り、終了日はその日が属する週の金曜日まで繰り越して**表示する（`getSaturdayOfWeek_` / `getFridayOfWeek_`、週は土曜始まり・金曜終わり）。例えばデータ内の日付が `2026/07/28`〜`2026/07/30`（火〜木）の場合、対象期間は `2026/07/25 〜 2026/07/31`（土〜金）と表示される。
 
-区切り行は見出しとして視認しやすいよう、**A列からS列(19列目)までをセル結合**し、**背景色**（既定: `#f3f3f3`、`Config.gs` の `PERIOD_SEPARATOR_BACKGROUND_COLOR`）と**太字**で装飾される。結合・装飾はこの区切り行1行にのみ適用され、データ行の書き込み列数には影響しない。結合に必要な列数がシートに無い場合は自動で列を追加する。結合する列数は `Config.gs` の `PERIOD_SEPARATOR_MERGE_COLUMNS`、ラベルの接頭辞・接尾辞は `PERIOD_SEPARATOR_PREFIX` / `PERIOD_SEPARATOR_SUFFIX` で変更できる。
+区切り行は見出しとして視認しやすいよう、**A列からX列(24列目)までをセル結合**し、**背景色**（既定: `#f3f3f3`、`Config.gs` の `PERIOD_SEPARATOR_BACKGROUND_COLOR`）と**太字**で装飾される。結合・装飾はこの区切り行1行にのみ適用され、データ行の書き込み列数には影響しない。結合に必要な列数がシートに無い場合は自動で列を追加する。結合する列数は `Config.gs` の `PERIOD_SEPARATOR_MERGE_COLUMNS`、ラベルの接頭辞・接尾辞は `PERIOD_SEPARATOR_PREFIX` / `PERIOD_SEPARATOR_SUFFIX` で変更できる。
 
 **区切り行は常にシート全体で1行だけ**であり、新しいファイルを取り込むたびに(1)削除→(2)ソート→(3)全データから再算出して先頭へ再挿入、という流れで作り直される。そのため、複数の区切り行が並んだり、ソート後に区切り行が末尾へ移動したりすることはなく、常に「2行目=対象期間の区切り行、3行目以降=報告日順に並んだ全データ」という構成が保たれる。
 
@@ -127,7 +127,7 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 - `Config.gs` の `NOTIFY_EMAIL` にメールアドレスを設定すると、処理失敗時のみ通知メールが届く。
 - 処理済みファイルIDの記録（スクリプトプロパティ `PROCESSED_FILE_IDS`）は直近 `PROCESSED_LOG_MAX` 件のみ保持する。件数を増減したい場合は `Config.gs` を編集する。
 - 報告日順ソート・対象期間の算出に使う列名の候補とフォールバック列番号は `Config.gs` の `REPORT_DATE_COLUMN_CANDIDATES` / `REPORT_DATE_FALLBACK_COLUMN` で変更できる。区切り行のラベル文言は `PERIOD_SEPARATOR_PREFIX` / `PERIOD_SEPARATOR_SUFFIX` / `PERIOD_UNKNOWN_LABEL`、結合列数・背景色は `PERIOD_SEPARATOR_MERGE_COLUMNS` / `PERIOD_SEPARATOR_BACKGROUND_COLOR` で変更できる。
-- 「週次報告記録」シートへ転記する列数の上限は `Config.gs` の `MAX_DATA_COLUMNS`（既定: 19列目 = S列）。**T列(20列目)以降は転記対象外**で、ヘッダー追加・値の書き込みのどちらも行われない（`ensureColumnsExist_` / `appendFileToTargetSheet_` / `appendEditToWeeklyReport_` で共通して適用）。転記したい列を増やしたい場合はこの値を変更する。
+- 「週次報告記録」シートへ転記する列数の上限は `Config.gs` の `MAX_DATA_COLUMNS`（既定: 24列目 = X列）。**Y列(25列目)以降は転記対象外**で、ヘッダー追加・値の書き込みのどちらも行われない（`ensureColumnsExist_` / `appendFileToTargetSheet_` / `appendEditToWeeklyReport_` で共通して適用）。転記したい列を増やしたい場合はこの値を変更する（区切り行の結合列数 `PERIOD_SEPARATOR_MERGE_COLUMNS` もこの値に合わせて変更すること）。
 - 編集時トリガーの監視条件（シート名キーワード・開始行・対象列・ヘッダー行・識別列数・1回あたりの最大処理行数・ステータス変更履歴シート名）はすべて `Config.gs` の `EDIT_SHEET_NAME_KEYWORD` / `EDIT_MIN_ROW` / `EDIT_TARGET_COLUMN` / `EDIT_HEADER_ROW` / `EDIT_IDENTIFIER_COLUMN_COUNT` / `EDIT_MAX_ROWS_PER_EVENT` / `STATUS_HISTORY_SHEET_NAME` で変更できる。
 
 ## トラブルシューティング
