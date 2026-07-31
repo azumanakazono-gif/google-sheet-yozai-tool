@@ -59,6 +59,14 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 
 **「週次報告記録」のヘッダー行に「対象期間」列は作成・追記しない。** 以前のバージョンで作成済みの「対象期間」列がヘッダーに残っている場合、そこには新たな値は書き込まれなくなる（不要であれば手動で削除してよい）。「今月」シート編集時の自動転記（onEdit）では区切り行は挿入されず、対象期間も記録されない（区切り行はファイル取り込み時のみ）。
 
+## 報告日順の自動ソート
+
+`syncWeeklyReports` が1件以上のファイルを処理した場合、最後に「週次報告記録」の**2行目以降**を「報告日」列で**昇順**（古い日付が上）に並べ替える。
+
+- ソート列は、ヘッダー行から `Config.gs` の `REPORT_DATE_COLUMN_NAME`（既定:「報告日」）という名前の列を探して使う。見つからない場合は `REPORT_DATE_FALLBACK_COLUMN`（既定: 9列目 = I列）を使う。
+- 区切り行（対象期間の見出し行）はA〜S列がセル結合されており、**結合セルを含む範囲はGoogle Apps Scriptの仕様上そのままではソートできない**（`You are trying to sort a range that contains merged cells` エラーになる）。そのため `sortWeeklyReportByReportDate_` は、ソート直前に対象範囲の結合をすべて解除（`breakApart()`）し、ソート後にA列の文言（`PERIOD_SEPARATOR_PREFIX` で始まるか）から区切り行を再検出して、結合・背景色・太字を自動でかけ直す。
+- **重要な注意点**: 区切り行は「報告日」列が空欄のため、Google Sheetsのソート仕様上、並べ替え後は常に末尾（または先頭。空欄は昇順・降順どちらでも常に最後に配置される）にまとまって移動する。そのため、並べ替え後は「区切り行がその回に取り込んだデータのすぐ上にある」という元のグルーピングの見た目は失われ、区切り行だけがひとかたまりになる点に留意すること。「対象期間ごとにデータをまとめて見たい」場合は、ソート機能を使わない運用（`syncWeeklyReports` 実行後に手動でソートしない）にするか、区切り行を使わない別の方式に切り替える必要がある。
+
 ## 編集時トリガー（見込確度の変更を自動転記）
 
 「今月」という文字列を含むシート名（例: `2026年7月_今月`）の **5行目以降・O列（15列目, 見込確度）** の変更を検知し、以下の2箇所へ自動的に1行追記する。
@@ -125,6 +133,7 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 - `Config.gs` の `NOTIFY_EMAIL` にメールアドレスを設定すると、処理失敗時のみ通知メールが届く。
 - 処理済みファイルIDの記録（スクリプトプロパティ `PROCESSED_FILE_IDS`）は直近 `PROCESSED_LOG_MAX` 件のみ保持する。件数を増減したい場合は `Config.gs` を編集する。
 - 対象期間の判定対象になる日付列名は `Config.gs` の `PERIOD_DATE_COLUMN_CANDIDATES`、区切り行のラベル文言は `PERIOD_SEPARATOR_PREFIX` / `PERIOD_SEPARATOR_SUFFIX` / `PERIOD_UNKNOWN_LABEL`、区切り行の結合列数・背景色は `PERIOD_SEPARATOR_MERGE_COLUMNS` / `PERIOD_SEPARATOR_BACKGROUND_COLOR` で変更できる。
+- 報告日順ソートの対象列名・フォールバック列番号は `Config.gs` の `REPORT_DATE_COLUMN_NAME` / `REPORT_DATE_FALLBACK_COLUMN` で変更できる。
 - 編集時トリガーの監視条件（シート名キーワード・開始行・対象列・ヘッダー行・識別列数・1回あたりの最大処理行数・ステータス変更履歴シート名）はすべて `Config.gs` の `EDIT_SHEET_NAME_KEYWORD` / `EDIT_MIN_ROW` / `EDIT_TARGET_COLUMN` / `EDIT_HEADER_ROW` / `EDIT_IDENTIFIER_COLUMN_COUNT` / `EDIT_MAX_ROWS_PER_EVENT` / `STATUS_HISTORY_SHEET_NAME` で変更できる。
 
 ## トラブルシューティング

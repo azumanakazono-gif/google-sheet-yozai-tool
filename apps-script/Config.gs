@@ -40,6 +40,12 @@ const CONFIG = {
   // 区切り行の背景色
   PERIOD_SEPARATOR_BACKGROUND_COLOR: '#f3f3f3',
 
+  // ===== 報告日順の自動ソート =====
+  // syncWeeklyReportsの最後に、この列名をヘッダーから探して昇順ソートする。
+  REPORT_DATE_COLUMN_NAME: '報告日',
+  // ヘッダーに上記の列名が見つからない場合に使う列番号（既定: 9列目 = I列）
+  REPORT_DATE_FALLBACK_COLUMN: 9,
+
   // ===== 編集時トリガー(onEdit)設定 =====
   // シート名にこの文字列を含む場合のみ編集を監視する
   EDIT_SHEET_NAME_KEYWORD: '今月',

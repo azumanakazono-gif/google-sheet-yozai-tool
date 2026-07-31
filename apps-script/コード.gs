@@ -15,6 +15,9 @@
  *   太字で装飾する。
  * - 転記済みファイルは「処理済み」フォルダへ移動し、同名ファイルがあればリネームして衝突を回避する。
  * - 万一の移動失敗に備え、処理済みファイルIDをスクリプトプロパティに記録し、再走時の二重追記を防ぐ。
+ * - syncWeeklyReportsの最後に、「週次報告記録」の2行目以降を「報告日」列(ヘッダー名で検出、
+ *   見つからない場合はI列=9列目)で昇順ソートする。区切り行の結合セルがあるとソートできない
+ *   仕様のため、ソート前に一旦結合を解除し、ソート後に区切り行を再検出して結合・装飾をかけ直す。
  * - 「今月」を含むシート名の5行目以降・O列(見込確度)の編集を検知し、「週次報告記録」と
  *   「週次ステータス変更履歴」へ自動転記する(onEdit)。この機能は、このスクリプトが
  *   「31期予材リスト」のコンテナバインド型スクリプトとして設置されている場合のみ動作する。
@@ -66,6 +69,12 @@ const CONFIG = {
   PERIOD_SEPARATOR_MERGE_COLUMNS: 19,
   // 区切り行の背景色
   PERIOD_SEPARATOR_BACKGROUND_COLOR: '#f3f3f3',
+
+  // ===== 報告日順の自動ソート =====
+  // syncWeeklyReportsの最後に、この列名をヘッダーから探して昇順ソートする。
+  REPORT_DATE_COLUMN_NAME: '報告日',
+  // ヘッダーに上記の列名が見つからない場合に使う列番号（既定: 9列目 = I列）
+  REPORT_DATE_FALLBACK_COLUMN: 9,
 
   // ===== 編集時トリガー(onEdit)設定 =====
   // シート名にこの文字列を含む場合のみ編集を監視する
@@ -132,6 +141,10 @@ function syncWeeklyReports() {
           Logger.log('エラーフォルダへの移動にも失敗: ' + file.getName() + ' / ' + moveErr);
         }
       }
+    }
+
+    if (processedCount > 0) {
+      sortWeeklyReportByReportDate_(targetSheet);
     }
 
     Logger.log(
@@ -377,6 +390,70 @@ function ensureMinColumns_(sheet, minCols) {
   if (currentMax < minCols) {
     sheet.insertColumnsAfter(currentMax, minCols - currentMax);
   }
+}
+
+// ===== 報告日順の自動ソート =====
+
+/**
+ * 「週次報告記録」の2行目以降を「報告日」列(見つからなければI列=9列目)で昇順ソートする。
+ * 区切り行(対象期間の見出し行)はA〜S列が結合されており、結合セルを含む範囲はそのままでは
+ * ソートできない(GASの仕様: 'You are trying to sort a range that contains merged cells')。
+ * そのため、ソート前に対象範囲の結合をすべて解除し、ソート後にA列の文言から区切り行を
+ * 再検出して結合・装飾をかけ直す。
+ */
+function sortWeeklyReportByReportDate_(targetSheet) {
+  const firstDataRow = 2;
+  const lastRow = targetSheet.getLastRow();
+  if (lastRow < firstDataRow) return;
+
+  const contentLastCol = targetSheet.getLastColumn();
+  const sortColumn = resolveReportDateColumn_(targetSheet, contentLastCol);
+  if (!sortColumn) {
+    Logger.log('報告日列が見つからないため、並べ替えをスキップします。');
+    return;
+  }
+
+  // 区切り行の結合(既定でA〜S列=19列目まで)を漏れなく解除できるよう、
+  // ソート対象の範囲は実データの列数と結合列数の大きい方まで広げる。
+  const lastCol = Math.max(contentLastCol, CONFIG.PERIOD_SEPARATOR_MERGE_COLUMNS);
+  const dataRange = targetSheet.getRange(firstDataRow, 1, lastRow - firstDataRow + 1, lastCol);
+
+  dataRange.breakApart();
+  dataRange.sort({ column: sortColumn, ascending: true });
+  reapplyPeriodSeparatorFormatting_(targetSheet);
+}
+
+/**
+ * ヘッダー行からREPORT_DATE_COLUMN_NAME(既定:「報告日」)の列を探す。
+ * 見つからない場合はREPORT_DATE_FALLBACK_COLUMN(既定: 9列目 = I列)を使う。
+ */
+function resolveReportDateColumn_(targetSheet, lastCol) {
+  if (lastCol > 0) {
+    const headerRow = targetSheet.getRange(1, 1, 1, lastCol).getValues()[0];
+    for (let i = 0; i < headerRow.length; i++) {
+      if (String(headerRow[i]).trim() === CONFIG.REPORT_DATE_COLUMN_NAME) {
+        return i + 1;
+      }
+    }
+  }
+  return CONFIG.REPORT_DATE_FALLBACK_COLUMN;
+}
+
+/**
+ * ソート後、A列の文言がPERIOD_SEPARATOR_PREFIXで始まる行(区切り行)を再検出し、
+ * A〜S列の結合・背景色・太字を再適用する。
+ */
+function reapplyPeriodSeparatorFormatting_(targetSheet) {
+  const lastRow = targetSheet.getLastRow();
+  if (lastRow < 2) return;
+
+  const colAValues = targetSheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  colAValues.forEach(function (row, idx) {
+    const value = String(row[0]);
+    if (value.indexOf(CONFIG.PERIOD_SEPARATOR_PREFIX) === 0) {
+      formatPeriodSeparatorRow_(targetSheet, idx + 2);
+    }
+  });
 }
 
 /**
