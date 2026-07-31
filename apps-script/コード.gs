@@ -57,6 +57,11 @@ const CONFIG = {
   // 処理済みファイルIDを記録しておく数（moveTo失敗時などの二重処理を防ぐ保険）
   PROCESSED_LOG_MAX: 300,
 
+  // ===== 転記対象の最大列数 =====
+  // 「週次報告記録」シートへ転記する列はこの列数まで（既定: 19列目 = S列）。
+  // T列(20列目)以降は不要なデータのため、ヘッダー追加・値の書き込みともに対象外とする。
+  MAX_DATA_COLUMNS: 19,
+
   // ===== 対象期間の区切り行 =====
   // 対象期間はデータ列(J列等)には記録せず、シート全体のデータの先頭(2行目)に
   // 1行だけの区切り行として表示する(複数ファイルにまたがっても、最小の報告日〜最大の
@@ -207,7 +212,7 @@ function appendFileToTargetSheet_(file, targetSheet) {
   }
 
   const headerMap = ensureColumnsExist_(targetSheet, sourceHeader);
-  const totalCols = targetSheet.getLastColumn();
+  const totalCols = Math.min(targetSheet.getLastColumn(), CONFIG.MAX_DATA_COLUMNS);
   const timestamp = new Date();
 
   const rowsToAppend = dataRows.map(function (row) {
@@ -217,7 +222,7 @@ function appendFileToTargetSheet_(file, targetSheet) {
     sourceHeader.forEach(function (colName, idx) {
       if (!colName) return;
       const col = headerMap[colName];
-      if (col) outRow[col - 1] = row[idx];
+      if (col && col <= totalCols) outRow[col - 1] = row[idx];
     });
     return outRow;
   });
@@ -229,6 +234,8 @@ function appendFileToTargetSheet_(file, targetSheet) {
 /**
  * 対象シートのヘッダー行(1行目)に、渡された列名のうち未登録のものを追加する。
  * ヘッダーが空の場合は「取込日時」「元ファイル名」から作成する。
+ * MAX_DATA_COLUMNS(既定: 19列目 = S列)に達している場合、それ以降の新規列は追加しない
+ * (T列以降は転記対象外のため)。
  * 戻り値: { 列名: 列番号(1始まり) } のマップ
  */
 function ensureColumnsExist_(targetSheet, headerNames) {
@@ -242,6 +249,7 @@ function ensureColumnsExist_(targetSheet, headerNames) {
 
   let changed = existing.length !== headerRow.length;
   headerNames.forEach(function (name) {
+    if (existing.length >= CONFIG.MAX_DATA_COLUMNS) return;
     const trimmed = String(name).trim();
     if (trimmed === '') return;
     if (existing.indexOf(trimmed) === -1) {
@@ -975,7 +983,7 @@ function appendEditToWeeklyReport_(sourceSheet, row, targetSheet) {
   const rowValues = sourceSheet.getRange(row, 1, 1, lastCol).getValues()[0];
 
   const headerMap = ensureColumnsExist_(targetSheet, sourceHeader);
-  const totalCols = targetSheet.getLastColumn();
+  const totalCols = Math.min(targetSheet.getLastColumn(), CONFIG.MAX_DATA_COLUMNS);
   const timestamp = new Date();
 
   const outRow = new Array(totalCols).fill('');
@@ -984,7 +992,7 @@ function appendEditToWeeklyReport_(sourceSheet, row, targetSheet) {
   sourceHeader.forEach(function (colName, idx) {
     if (!colName) return;
     const col = headerMap[colName];
-    if (col) outRow[col - 1] = rowValues[idx];
+    if (col && col <= totalCols) outRow[col - 1] = rowValues[idx];
   });
 
   const lastRow = targetSheet.getLastRow();
