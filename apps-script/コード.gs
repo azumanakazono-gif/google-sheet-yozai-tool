@@ -22,6 +22,9 @@
  * - 「今月」を含むシート名の5行目以降・O列(見込確度)の編集を検知し、「週次報告記録」と
  *   「週次ステータス変更履歴」へ自動転記する(onEdit)。この機能は、このスクリプトが
  *   「31期予材リスト」のコンテナバインド型スクリプトとして設置されている場合のみ動作する。
+ * - 「今月」タブのH列(案件名テキスト+ハイパーリンク)を、「週次ステータス変更履歴」のC列
+ *   (案件名)へ自動でコピーする。既存行に一括適用したい場合は applyProjectLinksToStatusHistory()
+ *   を手動実行する。
  *
  * 事前準備:
  *   1. appsscript.json の内容をマニフェストに反映する（エディタで「"appsscript.json"
@@ -95,7 +98,15 @@ const CONFIG = {
   // 1回の編集イベントで処理する最大行数（大量範囲貼り付け時のタイムアウト防止）
   EDIT_MAX_ROWS_PER_EVENT: 200,
   // ステータス変更履歴の記録先シート名
-  STATUS_HISTORY_SHEET_NAME: '週次ステータス変更履歴'
+  STATUS_HISTORY_SHEET_NAME: '週次ステータス変更履歴',
+
+  // ===== 「週次ステータス変更履歴」の案件名ハイパーリンク =====
+  // 「今月」タブのこの列(既定: H列)には、案件名テキストにURLへのハイパーリンクが
+  // 設定されている。同じテキスト+リンクを「週次ステータス変更履歴」の
+  // STATUS_HISTORY_PROJECT_COLUMNへ自動でコピーする。
+  EDIT_URL_COLUMN: 8,
+  // 「週次ステータス変更履歴」側で案件名+ハイパーリンクを表示する列（既定: 3列目 = C列）
+  STATUS_HISTORY_PROJECT_COLUMN: 3
 };
 
 // ===== メイン処理 (週次自動転記) =====
@@ -915,12 +926,20 @@ function onEdit(e) {
  * シート名に「今月」を含むシートの、EDIT_MIN_ROW行目以降・EDIT_TARGET_COLUMN列目
  * (既定: O列=見込確度)の変更を検知し、「週次報告記録」と「週次ステータス変更履歴」の
  * 両方へ自動転記する。範囲コピー&ペーストなど複数セル一括編集にも対応する。
+ * また、「週次ステータス変更履歴」のSTATUS_HISTORY_PROJECT_COLUMN(既定: C列)が手動で
+ * 編集された場合は、対応するハイパーリンクの自動セットのみを行う(handleStatusHistoryProjectEdit_)。
  */
 function handleEdit_(e) {
   if (!e || !e.range) return;
 
   const sheet = e.range.getSheet();
   const sheetName = sheet.getName();
+
+  if (sheetName === CONFIG.STATUS_HISTORY_SHEET_NAME) {
+    handleStatusHistoryProjectEdit_(e, sheet);
+    return;
+  }
+
   if (sheetName.indexOf(CONFIG.EDIT_SHEET_NAME_KEYWORD) === -1) return;
 
   const range = e.range;
@@ -1010,7 +1029,7 @@ function getStatusHistorySheet_() {
   }
   if (sheet.getLastRow() === 0) {
     sheet.getRange(1, 1, 1, 8).setValues([[
-      '変更日時', 'シート名', '行番号', '列名', '変更前', '変更後', '編集者', '識別情報'
+      '変更日時', 'シート名', '案件名', '列名', '変更前', '変更後', '編集者', '識別情報'
     ]]);
   }
   return sheet;
@@ -1020,6 +1039,8 @@ function getStatusHistorySheet_() {
  * 見込確度などの変更を「週次ステータス変更履歴」に1行追記する。
  * 識別情報には、対象行の1列目からEDIT_IDENTIFIER_COLUMN_COUNT列目までの値のうち
  * 空でないものだけを" / "区切りで連結して記録する(案件名・得意先名などを想定)。
+ * 追記後、STATUS_HISTORY_PROJECT_COLUMN(既定: C列)には「今月」タブのEDIT_URL_COLUMN
+ * (既定: H列、案件名テキスト+ハイパーリンク)をそのままコピーする。
  */
 function appendStatusHistory_(sourceSheet, row, oldValue, newValue, editorEmail, historySheet) {
   const idCount = Math.min(CONFIG.EDIT_IDENTIFIER_COLUMN_COUNT, CONFIG.EDIT_TARGET_COLUMN - 1);
@@ -1034,13 +1055,15 @@ function appendStatusHistory_(sourceSheet, row, oldValue, newValue, editorEmail,
   historySheet.appendRow([
     new Date(),
     sourceSheet.getName(),
-    row,
+    '',
     columnName,
     oldValue,
     newValue,
     editorEmail,
     identifier
   ]);
+
+  copyProjectHyperlink_(sourceSheet, row, historySheet, historySheet.getLastRow());
 }
 
 /**
@@ -1054,6 +1077,116 @@ function getColumnHeaderName_(sheet, col) {
   } catch (err) {
     return '列' + col;
   }
+}
+
+/**
+ * sourceSheetのEDIT_URL_COLUMN(既定: H列、案件名テキスト+ハイパーリンク)のリッチテキストを、
+ * historySheetのSTATUS_HISTORY_PROJECT_COLUMN(既定: C列)へそのままコピーする。
+ * 表示文字列とリンクURLをまとめて複製するため、案件名の表示とリンク先が常に一致する。
+ */
+function copyProjectHyperlink_(sourceSheet, sourceRow, historySheet, historyRow) {
+  const richText = sourceSheet.getRange(sourceRow, CONFIG.EDIT_URL_COLUMN).getRichTextValue();
+  if (!richText) return; // セルが空、または文字列以外の場合はnullになるためコピーしない
+  historySheet.getRange(historyRow, CONFIG.STATUS_HISTORY_PROJECT_COLUMN).setRichTextValue(richText);
+}
+
+/**
+ * 「週次ステータス変更履歴」のSTATUS_HISTORY_PROJECT_COLUMN(既定: C列)が手動で入力・更新
+ * された際、EDIT_SHEET_NAME_KEYWORD(既定:「今月」)を含むシートのEDIT_URL_COLUMN(既定: H列)
+ * と案件名テキストが完全一致する行を探し、そのハイパーリンクを自動でセットする。
+ */
+function handleStatusHistoryProjectEdit_(e, sheet) {
+  const range = e.range;
+  const firstRow = range.getRow();
+  const lastRow = firstRow + range.getNumRows() - 1;
+  const firstCol = range.getColumn();
+  const lastCol = firstCol + range.getNumColumns() - 1;
+  const col = CONFIG.STATUS_HISTORY_PROJECT_COLUMN;
+
+  if (col < firstCol || col > lastCol) return;
+  if (lastRow < 2) return;
+
+  const monthlySheet = findMonthlySheet_();
+  if (!monthlySheet) return;
+  const urlMap = buildProjectUrlMap_(monthlySheet);
+
+  const startRow = Math.max(firstRow, 2);
+  const endRow = Math.min(lastRow, startRow + CONFIG.EDIT_MAX_ROWS_PER_EVENT - 1);
+  for (let row = startRow; row <= endRow; row++) {
+    const cell = sheet.getRange(row, col);
+    const text = String(cell.getValue()).trim();
+    const richText = urlMap[text];
+    if (richText) cell.setRichTextValue(richText);
+  }
+}
+
+/**
+ * 「週次ステータス変更履歴」のSTATUS_HISTORY_PROJECT_COLUMN(既定: C列)のうち、まだ
+ * ハイパーリンクが設定されていないセルへ一括でリンクを設定する。EDIT_SHEET_NAME_KEYWORD
+ * (既定:「今月」)を含むシートのEDIT_URL_COLUMN(既定: H列)の案件名テキストと完全一致する
+ * 行を探し、そのリッチテキスト(表示文字列+リンクURL)をそのままコピーする。GASエディタから
+ * 手動で実行する(既にリンク済みのセルはスキップするため、何度でも再実行できる)。
+ */
+function applyProjectLinksToStatusHistory() {
+  const historySheet = getStatusHistorySheet_();
+  const monthlySheet = findMonthlySheet_();
+  if (!monthlySheet) {
+    Logger.log('「' + CONFIG.EDIT_SHEET_NAME_KEYWORD + '」を含むシートが見つかりませんでした。');
+    return;
+  }
+
+  const urlMap = buildProjectUrlMap_(monthlySheet);
+  const lastRow = historySheet.getLastRow();
+  if (lastRow < 2) return;
+
+  const col = CONFIG.STATUS_HISTORY_PROJECT_COLUMN;
+  let updatedCount = 0;
+  for (let row = 2; row <= lastRow; row++) {
+    const cell = historySheet.getRange(row, col);
+    const richText = cell.getRichTextValue();
+    if (richText && richText.getLinkUrl()) continue; // 既にリンク済み
+
+    const text = (richText ? richText.getText() : String(cell.getValue())).trim();
+    const match = urlMap[text];
+    if (!match) continue;
+
+    cell.setRichTextValue(match);
+    updatedCount++;
+  }
+  Logger.log(updatedCount + '件のセルへハイパーリンクを設定しました。');
+}
+
+/**
+ * EDIT_SHEET_NAME_KEYWORD(既定:「今月」)を含む最初のシートを返す。見つからない場合はnull。
+ */
+function findMonthlySheet_() {
+  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  const sheets = ss.getSheets();
+  for (let i = 0; i < sheets.length; i++) {
+    if (sheets[i].getName().indexOf(CONFIG.EDIT_SHEET_NAME_KEYWORD) !== -1) return sheets[i];
+  }
+  return null;
+}
+
+/**
+ * monthlySheetのEDIT_URL_COLUMN(既定: H列)から、{ 案件名テキスト: RichTextValue } の
+ * マップを作る。案件名が重複する場合は最後に見つかった行の値を採用する。
+ */
+function buildProjectUrlMap_(monthlySheet) {
+  const map = {};
+  const lastRow = monthlySheet.getLastRow();
+  if (lastRow < CONFIG.EDIT_MIN_ROW) return map;
+
+  const range = monthlySheet.getRange(
+    CONFIG.EDIT_MIN_ROW, CONFIG.EDIT_URL_COLUMN, lastRow - CONFIG.EDIT_MIN_ROW + 1, 1
+  );
+  range.getRichTextValues().forEach(function (cellArr) {
+    const richText = cellArr[0];
+    if (!richText) return;
+    const text = richText.getText().trim();
+    if (text !== '') map[text] = richText;
+  });
+  return map;
 }
 
 // ===== トリガー設定 =====
