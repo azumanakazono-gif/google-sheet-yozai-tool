@@ -15,6 +15,7 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 | `WeeklySync.gs` | メイン処理 (`syncWeeklyReports`) |
 | `Triggers.gs` | 週次トリガーをスクリプトから設定するためのヘルパー (`installWeeklyTrigger`) |
 | `コード.gs` | 上記3ファイル + ログリセット用関数 (`resetProcessedLog`) を1本にまとめた単一ファイル版。GASの標準ファイル名「コード.gs」にそのまま丸ごと貼り付けて使う想定 |
+| `StatusHistorySync.gs` | 「今月」を含む名前のシートのステータス列(O列)編集を「週次ステータス変更履歴」シートへ転記するonEditハンドラー (`myOnEdit`) とトリガー設定用ヘルパー (`installStatusHistoryEditTrigger`)。上記の週次同期機能とは独立した別機能 |
 
 `Config.gs`/`WeeklySync.gs`/`Triggers.gs`の3分割と`コード.gs`の単一ファイルは中身が重複しているだけで、同時に使う必要はない。GASプロジェクトにファイルを分けて置くなら前者3つを、1ファイルで完結させたいなら`コード.gs`のみを使う。**同一プロジェクト内で両方を貼り付けると`CONFIG`などが二重定義されエラーになるので注意。**
 
@@ -71,6 +72,32 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 エディタ上部の関数選択で `installWeeklyTrigger` を選び、一度実行する。
 毎週月曜6時台に `syncWeeklyReports` を実行するトリガーが作成される（既存の同名トリガーがあれば作り直される）。
 曜日・時刻を変えたい場合は `Triggers.gs` の `onWeekDay(...)` / `atHour(...)` を編集する。
+
+## ステータス変更履歴の自動転記 (`StatusHistorySync.gs`)
+
+「今月」を含む名前のシート（「【 今月 】」のような全角スペース・記号付きの表記ゆれを含む）で、
+ステータス列（O列 = 15列目、5行目以降）が編集された時に、変更内容を「週次ステータス変更履歴」シートへ
+自動転記する機能。上記の週次同期(`syncWeeklyReports`)とは独立しており、対象スプレッドシートに
+コンテナバインドされたスクリプトとして使う想定。
+
+- シート名判定は「今月」の**部分一致**で行い、判定前にシート名から全角/半角スペースを除去するため、
+  「今月」「 今月 」「【 今月 】」等の表記ゆれをすべて検知できる（`CONFIG_STATUS_HISTORY.EDIT_SHEET_NAME_KEYWORD`）。
+- 対象列(O列)・対象行(5行目以降)は、単一セル編集だけでなく複数セルへの範囲貼り付けでも編集範囲全体を
+  走査して判定するため、取りこぼしがない。
+- 転記先「週次ステータス変更履歴」シートが存在しない場合は自動でヘッダー付き作成する。
+- `myOnEdit(e)` は**インストール型トリガー**として動かす想定（`installStatusHistoryEditTrigger` で設定）。
+  シンプルトリガー(`onEdit(e)`)ではなくインストール型にしているのは、編集者の権限に関わらず
+  「週次ステータス変更履歴」への書き込みを確実に行うため。
+
+### 設定手順
+
+1. `StatusHistorySync.gs` の内容を対象スプレッドシートにコンテナバインドされたGASプロジェクトへ貼り付ける。
+2. エディタ上部の関数選択で `installStatusHistoryEditTrigger` を選び、一度実行して権限承認を行う。
+3. 対象シート（「今月」を含む名前）のO列（5行目以降）を編集し、「週次ステータス変更履歴」シートに
+   日時・シート名・行番号・識別子(A〜N列)・変更前・変更後・編集者が記録されることを確認する。
+
+`EDIT_MIN_ROW` / `EDIT_TARGET_COLUMN` / `EDIT_HEADER_ROW` / `EDIT_IDENTIFIER_COLUMN_COUNT` /
+`STATUS_HISTORY_SHEET_NAME` は `StatusHistorySync.gs` 冒頭の `CONFIG_STATUS_HISTORY` で変更できる。
 
 ## 補足・前提条件
 
