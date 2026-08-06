@@ -138,6 +138,12 @@ function appendFileToTargetSheet_(file, targetSheet) {
   const totalCols = Math.min(targetSheet.getLastColumn(), CONFIG.MAX_DATA_COLUMNS);
   const timestamp = new Date();
 
+  // 「案件種別」はANDPAD側の値をそのまま転記せず、案件(引合)名のテキストから
+  // classifyCategory_で自動判定して上書きする(カテゴリ別CVR集計を固定15分類で行うため)。
+  const projectNameColIdx = sourceHeader.findIndex(function (name) {
+    return (CONFIG.PROJECT_NAME_COLUMN_CANDIDATES || []).indexOf(name) !== -1;
+  });
+
   const rowsToAppend = dataRows.map(function (row) {
     const outRow = new Array(totalCols).fill('');
     outRow[headerMap['取込日時'] - 1] = timestamp;
@@ -147,6 +153,9 @@ function appendFileToTargetSheet_(file, targetSheet) {
       const col = headerMap[colName];
       if (col && col <= totalCols) outRow[col - 1] = row[idx];
     });
+    if (projectNameColIdx !== -1 && headerMap['案件種別'] && headerMap['案件種別'] <= totalCols) {
+      outRow[headerMap['案件種別'] - 1] = classifyCategory_(row[projectNameColIdx]);
+    }
     return outRow;
   });
 
@@ -461,6 +470,23 @@ function resolveCanonicalHeader_(name) {
     if (aliases[canonical].indexOf(trimmed) !== -1) return canonical;
   }
   return trimmed;
+}
+
+/**
+ * 案件(引合)名のテキストからCONFIG.CATEGORY_RULESを先頭から順に走査し、
+ * 最初にキーワードが一致したカテゴリ名を返す(案件種別の自動判定)。
+ * どれにも一致しない場合はCONFIG.CATEGORY_FALLBACK(既定:「その他」)を返す。
+ */
+function classifyCategory_(projectName) {
+  const text = String(projectName || '').toUpperCase();
+  const rules = CONFIG.CATEGORY_RULES || [];
+  for (let i = 0; i < rules.length; i++) {
+    const keywords = rules[i].keywords || [];
+    for (let j = 0; j < keywords.length; j++) {
+      if (text.indexOf(String(keywords[j]).toUpperCase()) !== -1) return rules[i].category;
+    }
+  }
+  return CONFIG.CATEGORY_FALLBACK || 'その他';
 }
 
 /**
