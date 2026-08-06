@@ -41,7 +41,20 @@ const CONFIG = {
   TIME_ZONE: 'Asia/Tokyo',
 
   // 処理済みファイルIDを記録しておく数（moveTo失敗時などの二重処理を防ぐ保険）
-  PROCESSED_LOG_MAX: 300
+  PROCESSED_LOG_MAX: 300,
+
+  // CVR集計用の正規列名。ANDPAD側の表記ゆれ(別名)を吸収し、必ずこの列名に正規化して書き込む。
+  // key: 週次報告記録シート上の正規列名 / value: ANDPAD側で使われうる別名(表記ゆれ)の配列。
+  // ここに無い列名は元の名前のまま追記される(自動追加)ので、ANDPAD側の実際の項目名を
+  // 確認のうえ、必要な別名を随時この配列に追加すること。
+  STAGE_COLUMN_ALIASES: {
+    '案件種別': ['案件種別', '案件区分', '種別'],
+    '属性': ['属性', '顧客属性', '反響属性'],
+    'アプローチ日': ['アプローチ日', '初回アプローチ日', '初回接触日', '反響日'],
+    '面談日': ['面談日', '面談実施日', '打合せ日', '初回面談日'],
+    '見積日': ['見積日', '見積提出日', '御見積日', '見積書提出日'],
+    '契約日': ['契約日', '成約日', '受注日']
+  }
 };
 
 // ===== メイン処理 =====
@@ -146,7 +159,11 @@ function appendFileToTargetSheet_(file, targetSheet) {
     return;
   }
 
-  const headerMap = ensureColumnsExist_(targetSheet, sourceHeader);
+  // CVR集計列(案件種別/属性/アプローチ日/面談日/見積日/契約日)は表記ゆれを吸収して正規化し、
+  // かつ今回のファイルに列が無くてもシート上には必ず存在させる(CVR集計式の列位置を安定させるため)。
+  const canonicalHeader = sourceHeader.map(resolveCanonicalHeader_);
+  const stageColumnNames = Object.keys(CONFIG.STAGE_COLUMN_ALIASES || {});
+  const headerMap = ensureColumnsExist_(targetSheet, canonicalHeader.concat(stageColumnNames));
   const totalCols = targetSheet.getLastColumn();
   const timestamp = new Date();
 
@@ -154,7 +171,7 @@ function appendFileToTargetSheet_(file, targetSheet) {
     const outRow = new Array(totalCols).fill('');
     outRow[headerMap['取込日時'] - 1] = timestamp;
     outRow[headerMap['元ファイル名'] - 1] = file.getName();
-    sourceHeader.forEach(function (colName, idx) {
+    canonicalHeader.forEach(function (colName, idx) {
       if (!colName) return;
       const col = headerMap[colName];
       if (col) outRow[col - 1] = row[idx];
@@ -197,6 +214,22 @@ function ensureColumnsExist_(targetSheet, headerNames) {
   const map = {};
   existing.forEach(function (name, idx) { map[name] = idx + 1; });
   return map;
+}
+
+/**
+ * ANDPAD側の列名がCONFIG.STAGE_COLUMN_ALIASESに登録された別名(表記ゆれ)と一致する場合、
+ * CVR集計用の正規列名(案件種別/属性/アプローチ日/面談日/見積日/契約日)に変換する。
+ * 一致しなければ元の列名をそのまま返す。
+ */
+function resolveCanonicalHeader_(name) {
+  const aliases = CONFIG.STAGE_COLUMN_ALIASES || {};
+  const trimmed = String(name).trim();
+  const canonicalNames = Object.keys(aliases);
+  for (let i = 0; i < canonicalNames.length; i++) {
+    const canonical = canonicalNames[i];
+    if (aliases[canonical].indexOf(trimmed) !== -1) return canonical;
+  }
+  return trimmed;
 }
 
 /**
@@ -563,7 +596,11 @@ function getTargetSheet_() {
     sheet = ss.insertSheet(CONFIG.TARGET_SHEET_NAME);
   }
   if (sheet.getLastRow() === 0) {
-    sheet.getRange(1, 1, 1, 2).setValues([['取込日時', '元ファイル名']]);
+    // 新規シート作成時はCVR集計列まで含めて初期ヘッダーを作る
+    // (取込日時, 元ファイル名, 案件種別, 属性, アプローチ日, 面談日, 見積日, 契約日)。
+    // 既存シートの場合はここを通らず、ensureColumnsExist_ が不足列を末尾に自動追加する。
+    const defaultHeader = ['取込日時', '元ファイル名'].concat(Object.keys(CONFIG.STAGE_COLUMN_ALIASES || {}));
+    sheet.getRange(1, 1, 1, defaultHeader.length).setValues([defaultHeader]);
   }
   return sheet;
 }
