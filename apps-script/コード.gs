@@ -84,6 +84,36 @@ const CONFIG = {
     '契約日': ['契約日', '成約日', '受注日', '契約']
   },
 
+  // ===== 案件種別の自動判定(カテゴリ分類) =====
+  // 「案件（引合）名」のテキストに含まれるキーワードから「案件種別」列の値を自動判定する
+  // (classifyCategory_)。データ入力規則で定義されている15カテゴリ(「風力」は対象外)を
+  // 優先順位の高い順に並べている。上から順にキーワードを走査し、最初に一致したカテゴリを
+  // 採用する。どれにも一致しない場合はCATEGORY_FALLBACKを使う。
+  // 実際のANDPAD案件名の表記に合わせて、随時keywordsを追加・調整すること。
+  CATEGORY_RULES: [
+    { category: '事業者用PV', keywords: ['事業者用PV', '事業用PV', '産業用PV'] },
+    { category: 'リパワリング', keywords: ['リパワリング', 'リパワー'] },
+    { category: '事業者PCS交換', keywords: ['事業者PCS交換', '事業用PCS交換', '産業用PCS交換'] },
+    { category: 'リプレイス', keywords: ['リプレイス'] },
+    { category: '事業者用創蓄', keywords: ['事業者用創蓄', '事業用創蓄', '産業用創蓄', '事業者用蓄電池'] },
+    { category: '住宅用PV', keywords: ['住宅用PV'] },
+    { category: '住宅用創蓄', keywords: ['住宅用創蓄', '住宅用蓄電池'] },
+    { category: 'EV充放電システム', keywords: ['EV充放電システム', 'EV充放電'] },
+    { category: '戸建てPCS交換', keywords: ['戸建てPCS交換', '戸建PCS交換'] },
+    { category: 'EQ/オール電化', keywords: ['EQ/オール電化', 'EQ／オール電化', 'オール電化', 'EQ'] },
+    { category: 'O&M', keywords: ['O&M', 'O＆M', 'Ｏ&Ｍ', 'Ｏ＆Ｍ'] },
+    { category: 'メンテナンス', keywords: ['メンテナンス', 'メンテ'] },
+    { category: "LED'S", keywords: ["LED'S", 'LED’S', 'LEDS'] },
+    { category: '行政案件', keywords: ['行政案件', '行政'] }
+    // 「その他」は上記いずれにも一致しなかった場合のフォールバック(CATEGORY_FALLBACK)として扱うため、
+    // ルール一覧には含めない。
+  ],
+  // 上記いずれのキーワードにも一致しなかった場合に「案件種別」へ設定する値。
+  CATEGORY_FALLBACK: 'その他',
+  // 「案件種別」を自動判定する元になる、案件名が入っている列のヘッダー名候補。
+  // ANDPAD側の表記ゆれ(「案件名」「引合名」など)を吸収するため、上から順に一致する列を探す。
+  PROJECT_NAME_COLUMN_CANDIDATES: ['案件（引合）名', '案件(引合)名', '案件名', '引合名', '案件名称'],
+
   // ===== 転記対象の最大列数 =====
   // 「週次報告記録」シートへ転記する列はこの列数まで（既定: 30列目 = AD列）。
   // それ以降の列は不要なデータのため、ヘッダー追加・値の書き込みともに対象外とする。
@@ -256,6 +286,12 @@ function appendFileToTargetSheet_(file, targetSheet) {
   const totalCols = Math.min(targetSheet.getLastColumn(), CONFIG.MAX_DATA_COLUMNS);
   const timestamp = new Date();
 
+  // 「案件種別」はANDPAD側の値をそのまま転記せず、案件(引合)名のテキストから
+  // classifyCategory_で自動判定して上書きする(カテゴリ別CVR集計を固定15分類で行うため)。
+  const projectNameColIdx = sourceHeader.findIndex(function (name) {
+    return (CONFIG.PROJECT_NAME_COLUMN_CANDIDATES || []).indexOf(name) !== -1;
+  });
+
   const rowsToAppend = dataRows.map(function (row) {
     const outRow = new Array(totalCols).fill('');
     outRow[headerMap['取込日時'] - 1] = timestamp;
@@ -265,6 +301,9 @@ function appendFileToTargetSheet_(file, targetSheet) {
       const col = headerMap[colName];
       if (col && col <= totalCols) outRow[col - 1] = row[idx];
     });
+    if (projectNameColIdx !== -1 && headerMap['案件種別'] && headerMap['案件種別'] <= totalCols) {
+      outRow[headerMap['案件種別'] - 1] = classifyCategory_(row[projectNameColIdx]);
+    }
     return outRow;
   });
 
@@ -579,6 +618,23 @@ function resolveCanonicalHeader_(name) {
     if (aliases[canonical].indexOf(trimmed) !== -1) return canonical;
   }
   return trimmed;
+}
+
+/**
+ * 案件(引合)名のテキストからCONFIG.CATEGORY_RULESを先頭から順に走査し、
+ * 最初にキーワードが一致したカテゴリ名を返す(案件種別の自動判定)。
+ * どれにも一致しない場合はCONFIG.CATEGORY_FALLBACK(既定:「その他」)を返す。
+ */
+function classifyCategory_(projectName) {
+  const text = String(projectName || '').toUpperCase();
+  const rules = CONFIG.CATEGORY_RULES || [];
+  for (let i = 0; i < rules.length; i++) {
+    const keywords = rules[i].keywords || [];
+    for (let j = 0; j < keywords.length; j++) {
+      if (text.indexOf(String(keywords[j]).toUpperCase()) !== -1) return rules[i].category;
+    }
+  }
+  return CONFIG.CATEGORY_FALLBACK || 'その他';
 }
 
 /**
