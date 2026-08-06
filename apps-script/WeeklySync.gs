@@ -130,7 +130,7 @@ function appendFileToTargetSheet_(file, targetSheet) {
     return;
   }
 
-  // CVR集計列(案件種別/属性/アプローチ日/面談日/見積日/契約日)は表記ゆれを吸収して正規化し、
+  // CVR集計列(案件種別/属性/アプローチ日/面談日/提案日/契約日)は表記ゆれを吸収して正規化し、
   // かつ今回のファイルに列が無くてもシート上には必ず存在させる(CVR集計式の列位置を安定させるため)。
   const canonicalHeader = sourceHeader.map(resolveCanonicalHeader_);
   const stageColumnNames = Object.keys(CONFIG.STAGE_COLUMN_ALIASES || {});
@@ -449,7 +449,7 @@ function extractDateBoundsFromFileName_(fileName) {
 
 /**
  * ANDPAD側の列名がCONFIG.STAGE_COLUMN_ALIASESに登録された別名(表記ゆれ)と一致する場合、
- * CVR集計用の正規列名(案件種別/属性/アプローチ日/面談日/見積日/契約日)に変換する。
+ * CVR集計用の正規列名(案件種別/属性/アプローチ日/面談日/提案日/契約日)に変換する。
  * 一致しなければ元の列名をそのまま返す。
  */
 function resolveCanonicalHeader_(name) {
@@ -828,7 +828,7 @@ function getTargetSheet_() {
   }
   if (sheet.getLastRow() === 0) {
     // 新規シート作成時はCVR集計列まで含めて初期ヘッダーを作る
-    // (取込日時, 元ファイル名, 案件種別, 属性, アプローチ日, 面談日, 見積日, 契約日)。
+    // (取込日時, 元ファイル名, 案件種別, 属性, アプローチ日, 面談日, 提案日, 契約日)。
     // 既存シートの場合はここを通らず、ensureColumnsExist_ が不足列を末尾に自動追加する。
     const defaultHeader = ['取込日時', '元ファイル名'].concat(Object.keys(CONFIG.STAGE_COLUMN_ALIASES || {}));
     sheet.getRange(1, 1, 1, defaultHeader.length).setValues([defaultHeader]);
