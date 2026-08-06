@@ -132,12 +132,13 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 - 対応形式は **.xlsx(ZIP構造)・HTMLテーブル(拡張子だけ.xlsx/.xlsのケースを含む)** の2種類。旧形式のバイナリ.xls(Excel 97-2003, OLE構造)は読み取れず、エラーとして`エラー`フォルダへ移動される。ANDPADから.xls形式で出力される場合は、事前に.xlsxで保存し直すか、ANDPAD側の出力設定を確認すること。
 - HTMLテーブルとして読み取る場合、複数の`<table>`がある中から行数最多のものを自動選択するが、レイアウト目的の入れ子テーブル構成によっては意図しないテーブルが選ばれる可能性がある。その場合は`readValuesFromHtmlTable_`のテーブル選択ロジックを対象ファイルの実際の構造に合わせて調整すること。
 - **日付・数値の書式は反映されない。** セルの生の値（文字列/数値/真偽値）をそのまま読み取るため、日付書式が設定されたセルはExcel内部のシリアル値（例: `45123`）としてそのまま入る。日付として扱いたい場合は、取り込み後にスプレッドシート側で書式設定するか、`extractCellValue_`にシリアル値→Dateの変換を追加する。
-- 列はヘッダー名（1行目）でマッチングするため、ANDPAD側で列順が変わったり列が増えたりしても正しい列に入る。ただし **表記ゆれ（例:「品名」と「品目名」など別名扱い）までは自動判定しない**。表記ゆれを吸収したい場合は `ensureColumnsExist_` / `appendFileToTargetSheet_` にエイリアス変換表を追加する。
+- 列はヘッダー名（1行目）でマッチングするため、ANDPAD側で列順が変わったり列が増えたりしても正しい列に入る。表記ゆれ（例:「初回接触日」と「アプローチ日」など別名扱い）は `Config.gs` の `STAGE_COLUMN_ALIASES` に登録した項目のみ自動で正規化される（`resolveCanonicalHeader_`）。それ以外の列は表記ゆれを自動判定しないため、必要なら `STAGE_COLUMN_ALIASES` に別名を追加するか、同様のエイリアス変換表を追加する。
+- CVR(コンバージョンレート)集計用に、`案件種別` / `属性` / `アプローチ日` / `面談日` / `提案日` / `契約日` の6列は `syncWeeklyReports` 実行時に必ずシート上へ存在するよう自動追加される（今回のファイルに該当列が無くても列自体は作られ、値は空欄のまま）。集計方法・数式例は `CVR_KPI_DESIGN.md` を参照。
 - `Config.gs` の `SOURCE_HAS_HEADER` が `false` の場合は「列1」「列2」...という仮のヘッダー名で取り込む（フォーマット変動への耐性は下がる）。
 - `Config.gs` の `NOTIFY_EMAIL` にメールアドレスを設定すると、処理失敗時のみ通知メールが届く。
 - 処理済みファイルIDの記録（スクリプトプロパティ `PROCESSED_FILE_IDS`）は直近 `PROCESSED_LOG_MAX` 件のみ保持する。件数を増減したい場合は `Config.gs` を編集する。
 - 報告日順ソート・対象期間の算出に使う列名の候補とフォールバック列番号は `Config.gs` の `REPORT_DATE_COLUMN_CANDIDATES` / `REPORT_DATE_FALLBACK_COLUMN` で変更できる。区切り行のラベル文言は `PERIOD_SEPARATOR_PREFIX` / `PERIOD_SEPARATOR_SUFFIX` / `PERIOD_UNKNOWN_LABEL`、結合列数・背景色は `PERIOD_SEPARATOR_MERGE_COLUMNS` / `PERIOD_SEPARATOR_BACKGROUND_COLOR` で変更できる。
-- 「週次報告記録」シートへ転記する列数の上限は `Config.gs` の `MAX_DATA_COLUMNS`（既定: 24列目 = X列）。**Y列(25列目)以降は転記対象外**で、ヘッダー追加・値の書き込みのどちらも行われない（`ensureColumnsExist_` / `appendFileToTargetSheet_` / `appendEditToWeeklyReport_` で共通して適用）。転記したい列を増やしたい場合はこの値を変更する（区切り行の結合列数 `PERIOD_SEPARATOR_MERGE_COLUMNS` もこの値に合わせて変更すること）。
+- 「週次報告記録」シートへ転記する列数の上限は `Config.gs` の `MAX_DATA_COLUMNS`（既定: 30列目 = AD列。ANDPAD側の元24列 + CVR集計用6列分の余裕）。**上限を超える列は転記対象外**で、ヘッダー追加・値の書き込みのどちらも行われない（`ensureColumnsExist_` / `appendFileToTargetSheet_` / `appendEditToWeeklyReport_` で共通して適用）。転記したい列を増やしたい場合はこの値を変更する（区切り行の結合列数 `PERIOD_SEPARATOR_MERGE_COLUMNS` もこの値に合わせて変更すること）。
 - 編集時トリガーの監視条件（シート名キーワード・開始行・対象列・ヘッダー行・識別列数・1回あたりの最大処理行数・ステータス変更履歴シート名）はすべて `Config.gs` の `EDIT_SHEET_NAME_KEYWORD` / `EDIT_MIN_ROW` / `EDIT_TARGET_COLUMN` / `EDIT_HEADER_ROW` / `EDIT_IDENTIFIER_COLUMN_COUNT` / `EDIT_MAX_ROWS_PER_EVENT` / `STATUS_HISTORY_SHEET_NAME` で変更できる。
 
 ## トラブルシューティング

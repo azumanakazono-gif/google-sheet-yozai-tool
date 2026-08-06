@@ -60,10 +60,36 @@ const CONFIG = {
   // 処理済みファイルIDを記録しておく数（moveTo失敗時などの二重処理を防ぐ保険）
   PROCESSED_LOG_MAX: 300,
 
+  // CVR集計用の正規列名。ANDPAD側の表記ゆれ(別名)を吸収し、必ずこの列名に正規化して書き込む。
+  // key: 週次報告記録シート上の正規列名 / value: ANDPAD側で使われうる別名(表記ゆれ)の配列。
+  // ここに無い列名は元の名前のまま追記される(自動追加)ので、ANDPAD側の実際の項目名を
+  // 確認のうえ、必要な別名を随時この配列に追加すること。
+  // CVR集計はANDPAD報告画面の4ステータス「アプローチ」「面談」「提案（見積提示）」「契約」を
+  // 基準とする。各ステータスの到達日を以下の正規列名で保持し、
+  //   ①アプローチ→面談CVR = 面談数 ÷ アプローチ数
+  //   ②面談→提案（見積提示）CVR = 提案数 ÷ 面談数
+  //   ③提案（見積提示）→契約CVR = 契約数 ÷ 提案数
+  // を算出する(詳細はCVR_KPI_DESIGN.md参照)。「提案（見積提示）」はANDPAD側の表記が
+  // 全角/半角カッコや「見積日」「提案日」など揺れうるため、別名を広めに登録している。
+  STAGE_COLUMN_ALIASES: {
+    '案件種別': ['案件種別', '案件区分', '種別'],
+    '属性': ['属性', '顧客属性', '反響属性'],
+    'アプローチ日': ['アプローチ日', '初回アプローチ日', '初回接触日', '反響日', 'アプローチ'],
+    '面談日': ['面談日', '面談実施日', '打合せ日', '初回面談日', '面談'],
+    '提案日': [
+      '提案日', '提案（見積提示）', '提案(見積提示)',
+      '提案（見積提示）日', '提案(見積提示)日',
+      '見積日', '見積提出日', '御見積日', '見積書提出日', '提案書提出日'
+    ],
+    '契約日': ['契約日', '成約日', '受注日', '契約']
+  },
+
   // ===== 転記対象の最大列数 =====
-  // 「週次報告記録」シートへ転記する列はこの列数まで（既定: 24列目 = X列）。
-  // Y列(25列目)以降は不要なデータのため、ヘッダー追加・値の書き込みともに対象外とする。
-  MAX_DATA_COLUMNS: 24,
+  // 「週次報告記録」シートへ転記する列はこの列数まで（既定: 30列目 = AD列）。
+  // それ以降の列は不要なデータのため、ヘッダー追加・値の書き込みともに対象外とする。
+  // ANDPAD側の列(元24列)に加え、STAGE_COLUMN_ALIASESのCVR集計用6列(案件種別/属性/
+  // アプローチ日/面談日/提案日/契約日)が収まるよう6列分の余裕を持たせている。
+  MAX_DATA_COLUMNS: 30,
 
   // ===== 対象期間の区切り行 =====
   // 対象期間はデータ列(J列等)には記録せず、シート全体のデータの先頭(2行目)に
@@ -73,8 +99,8 @@ const CONFIG = {
   PERIOD_SEPARATOR_SUFFIX: '】',
   // 対象期間が判定できなかった場合に区切り行へ表示する文言
   PERIOD_UNKNOWN_LABEL: '不明',
-  // 区切り行をA列からこの列数まで結合する（既定: MAX_DATA_COLUMNSと同じ24列目 = X列）
-  PERIOD_SEPARATOR_MERGE_COLUMNS: 24,
+  // 区切り行をA列からこの列数まで結合する（既定: MAX_DATA_COLUMNSと同じ30列目 = AD列）
+  PERIOD_SEPARATOR_MERGE_COLUMNS: 30,
   // 区切り行の背景色
   PERIOD_SEPARATOR_BACKGROUND_COLOR: '#f3f3f3',
 
@@ -222,7 +248,11 @@ function appendFileToTargetSheet_(file, targetSheet) {
     return;
   }
 
-  const headerMap = ensureColumnsExist_(targetSheet, sourceHeader);
+  // CVR集計列(案件種別/属性/アプローチ日/面談日/提案日/契約日)は表記ゆれを吸収して正規化し、
+  // かつ今回のファイルに列が無くてもシート上には必ず存在させる(CVR集計式の列位置を安定させるため)。
+  const canonicalHeader = sourceHeader.map(resolveCanonicalHeader_);
+  const stageColumnNames = Object.keys(CONFIG.STAGE_COLUMN_ALIASES || {});
+  const headerMap = ensureColumnsExist_(targetSheet, canonicalHeader.concat(stageColumnNames));
   const totalCols = Math.min(targetSheet.getLastColumn(), CONFIG.MAX_DATA_COLUMNS);
   const timestamp = new Date();
 
@@ -230,7 +260,7 @@ function appendFileToTargetSheet_(file, targetSheet) {
     const outRow = new Array(totalCols).fill('');
     outRow[headerMap['取込日時'] - 1] = timestamp;
     outRow[headerMap['元ファイル名'] - 1] = file.getName();
-    sourceHeader.forEach(function (colName, idx) {
+    canonicalHeader.forEach(function (colName, idx) {
       if (!colName) return;
       const col = headerMap[colName];
       if (col && col <= totalCols) outRow[col - 1] = row[idx];
@@ -533,6 +563,22 @@ function extractDateBoundsFromFileName_(fileName) {
   if (isNaN(start.getTime()) || isNaN(end.getTime())) return null;
 
   return { start: start, end: end };
+}
+
+/**
+ * ANDPAD側の列名がCONFIG.STAGE_COLUMN_ALIASESに登録された別名(表記ゆれ)と一致する場合、
+ * CVR集計用の正規列名(案件種別/属性/アプローチ日/面談日/提案日/契約日)に変換する。
+ * 一致しなければ元の列名をそのまま返す。
+ */
+function resolveCanonicalHeader_(name) {
+  const aliases = CONFIG.STAGE_COLUMN_ALIASES || {};
+  const trimmed = String(name).trim();
+  const canonicalNames = Object.keys(aliases);
+  for (let i = 0; i < canonicalNames.length; i++) {
+    const canonical = canonicalNames[i];
+    if (aliases[canonical].indexOf(trimmed) !== -1) return canonical;
+  }
+  return trimmed;
 }
 
 /**
@@ -899,7 +945,11 @@ function getTargetSheet_() {
     sheet = ss.insertSheet(CONFIG.TARGET_SHEET_NAME);
   }
   if (sheet.getLastRow() === 0) {
-    sheet.getRange(1, 1, 1, 2).setValues([['取込日時', '元ファイル名']]);
+    // 新規シート作成時はCVR集計列まで含めて初期ヘッダーを作る
+    // (取込日時, 元ファイル名, 案件種別, 属性, アプローチ日, 面談日, 提案日, 契約日)。
+    // 既存シートの場合はここを通らず、ensureColumnsExist_ が不足列を末尾に自動追加する。
+    const defaultHeader = ['取込日時', '元ファイル名'].concat(Object.keys(CONFIG.STAGE_COLUMN_ALIASES || {}));
+    sheet.getRange(1, 1, 1, defaultHeader.length).setValues([defaultHeader]);
   }
   return sheet;
 }
