@@ -88,25 +88,6 @@ const CONFIG = {
   // アプローチ日/面談日/提案日/契約日)が収まるよう6列分の余裕を持たせている。
   MAX_DATA_COLUMNS: 30,
 
-  // ===== 対象期間の区切り行 =====
-  // 対象期間はデータ列(J列等)には記録せず、シート全体のデータの先頭(2行目)に
-  // 1行だけの区切り行として表示する(複数ファイルにまたがっても、最小の報告日〜最大の
-  // 報告日を1行に集約する)。ラベルの接頭辞・接尾辞（例:「【対象期間：2026/07/20 〜 2026/07/26】」）
-  PERIOD_SEPARATOR_PREFIX: '【対象期間：',
-  PERIOD_SEPARATOR_SUFFIX: '】',
-  // 対象期間が判定できなかった場合に区切り行へ表示する文言
-  PERIOD_UNKNOWN_LABEL: '不明',
-  // 区切り行をA列からこの列数まで結合する（既定: MAX_DATA_COLUMNSと同じ30列目 = AD列）
-  PERIOD_SEPARATOR_MERGE_COLUMNS: 30,
-  // 区切り行の背景色
-  PERIOD_SEPARATOR_BACKGROUND_COLOR: '#f3f3f3',
-
-  // ===== 報告日順の自動ソート・対象期間の集計に使う列 =====
-  // ヘッダーからこの順で列名を探し、最初に見つかった列を「報告日」列として扱う。
-  // どれも見つからない場合はREPORT_DATE_FALLBACK_COLUMN(既定: 9列目 = I列)を使う。
-  REPORT_DATE_COLUMN_CANDIDATES: ['報告日', '日付', '対象日', '実施日', '報告日時', '登録日'],
-  REPORT_DATE_FALLBACK_COLUMN: 9,
-
   // ===== 編集時トリガー(onEdit)設定 =====
   // シート名にこの文字列を含む場合のみ編集を監視する
   EDIT_SHEET_NAME_KEYWORD: '今月',
