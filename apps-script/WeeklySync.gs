@@ -9,15 +9,8 @@
  * - 列はヘッダー名でマッチングして書き込むため、ANDPAD側の列順変更や列追加（フォーマットの揺れ）に強い。
  * - 転記済みファイルは「処理済み」フォルダへ移動し、同名ファイルがあればリネームして衝突を回避する。
  * - 万一の移動失敗に備え、処理済みファイルIDをプロパティに記録し、再走時の二重追記を防ぐ。
- * - syncWeeklyReportsの最後に、「週次報告記録」を「報告日」列(ヘッダー名で検出、見つからない
- *   場合はI列=9列目)で昇順ソートする。そのうえで、シート全体のデータから対象期間(最小の
- *   報告日〜最大の報告日。報告日列が判定できない場合は「元ファイル名」列に含まれる日付から
- *   フォールバック)を算出し、毎週金曜日に報告を締める運用にあわせて、その開始日・終了日を
- *   それぞれが属する「土曜日始まり・金曜日終わり」の週の土曜日・金曜日まで拡張したうえで、
- *   「2行目」に「【対象期間：2026/07/25 〜 2026/07/31】」のような区切り行を1行だけ挿入する
- *   (A〜X列を結合し、背景色と太字で装飾)。区切り行は常に1行のみで、新しいファイルを
- *   取り込むたびに削除・再算出・再挿入されるため、複数の区切り行が並んだりソート後に
- *   末尾へ移動したりすることはない。
+ * - 「対象期間」の区切り行は挿入せず、読み取ったデータをそのまま「週次報告記録」シート末尾に
+ *   追記する(ソートや区切り行の再構築は行わない)。
  */
 function syncWeeklyReports() {
   const lock = LockService.getScriptLock();
@@ -67,14 +60,6 @@ function syncWeeklyReports() {
       }
     }
 
-    if (processedCount > 0) {
-      // 既存の対象期間区切り行を取り除いてから報告日順にソートし、シート全体のデータから
-      // 算出した対象期間(最小の報告日〜最大の報告日)を表す区切り行を先頭(2行目)に挿入し直す。
-      removeExistingPeriodSeparatorRows_(targetSheet);
-      sortWeeklyReportByReportDate_(targetSheet);
-      insertPeriodSummaryRow_(targetSheet);
-    }
-
     Logger.log(
       '処理完了: ' + processedCount + '件 / スキップ: ' + skippedCount + '件 / 失敗: ' + errors.length + '件'
     );
@@ -95,9 +80,7 @@ function syncWeeklyReports() {
 /**
  * 1ファイル分のデータを読み取り、対象シートの末尾に追記する。
  * 列はヘッダー名でマッチングするため、ANDPAD側の列順・列追加の揺れを吸収する。
- * 対象期間の区切り行はここでは挿入しない(syncWeeklyReportsが全ファイル処理後に
- * removeExistingPeriodSeparatorRows_ / sortWeeklyReportByReportDate_ / insertPeriodSummaryRow_
- * を通じて、シート全体のデータから算出した区切り行を先頭にまとめて1行だけ挿入する)。
+ * 「対象期間」の区切り行は挿入せず、読み取った行をそのままシート末尾へ追記するだけである。
  */
 function appendFileToTargetSheet_(file, targetSheet) {
   const mimeType = file.getMimeType();
@@ -197,263 +180,6 @@ function ensureColumnsExist_(targetSheet, headerNames) {
   const map = {};
   existing.forEach(function (name, idx) { map[name] = idx + 1; });
   return map;
-}
-
-// ===== 対象期間の区切り行 =====
-
-/**
- * セルの値(Date/Excelシリアル値/文字列)をDateに変換する。変換できない場合はnullを返す。
- */
-function toDateValue_(value) {
-  if (value instanceof Date) {
-    return isNaN(value.getTime()) ? null : value;
-  }
-  if (typeof value === 'number') {
-    // Excelのシリアル値(1899-12-30起点)をDateに変換する。極端な値は日付列とみなさない。
-    if (value <= 0 || value > 100000) return null;
-    const epoch = Date.UTC(1899, 11, 30);
-    const date = new Date(epoch + value * 86400000);
-    return isNaN(date.getTime()) ? null : date;
-  }
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (trimmed === '') return null;
-    const match = trimmed.match(/^(\d{4})[\/\-年](\d{1,2})[\/\-月](\d{1,2})/);
-    if (match) {
-      const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-      return isNaN(date.getTime()) ? null : date;
-    }
-    const parsed = new Date(trimmed);
-    return isNaN(parsed.getTime()) ? null : parsed;
-  }
-  return null;
-}
-
-/**
- * 開始日・終了日を「yyyy/MM/dd 〜 yyyy/MM/dd」形式の文字列にする。
- */
-function formatPeriod_(start, end) {
-  const from = Utilities.formatDate(start, CONFIG.TIME_ZONE, 'yyyy/MM/dd');
-  const to = Utilities.formatDate(end, CONFIG.TIME_ZONE, 'yyyy/MM/dd');
-  return from + ' 〜 ' + to;
-}
-
-/**
- * 対象期間の区切り行を作る。A列に「【対象期間：yyyy/MM/dd 〜 yyyy/MM/dd】」を入れ、
- * それ以外の列はすべて空欄にする。対象期間が判定できなかった場合はPERIOD_UNKNOWN_LABELを表示する。
- */
-function buildPeriodSeparatorRow_(periodValue, totalCols) {
-  const row = new Array(totalCols).fill('');
-  row[0] = CONFIG.PERIOD_SEPARATOR_PREFIX + (periodValue || CONFIG.PERIOD_UNKNOWN_LABEL) + CONFIG.PERIOD_SEPARATOR_SUFFIX;
-  return row;
-}
-
-/**
- * 区切り行をA列からPERIOD_SEPARATOR_MERGE_COLUMNS列目(既定: X列)まで結合し、
- * 背景色(PERIOD_SEPARATOR_BACKGROUND_COLOR)と太字で装飾する。
- * データ列数(totalCols)がPERIOD_SEPARATOR_MERGE_COLUMNS未満でも結合できるよう、
- * 事前にシートの列数を必要分だけ拡張する。この処理は指定した1行のみに閉じており、
- * データの書き込み(setValues)には影響しない。
- */
-function formatPeriodSeparatorRow_(targetSheet, rowNumber) {
-  const mergeCols = CONFIG.PERIOD_SEPARATOR_MERGE_COLUMNS;
-  ensureMinColumns_(targetSheet, mergeCols);
-
-  const range = targetSheet.getRange(rowNumber, 1, 1, mergeCols);
-  range.setBackground(CONFIG.PERIOD_SEPARATOR_BACKGROUND_COLOR);
-  range.setFontWeight('bold');
-  range.merge();
-}
-
-/**
- * シートの列数がminColsに満たない場合、不足分の列を末尾に追加する。
- */
-function ensureMinColumns_(sheet, minCols) {
-  const currentMax = sheet.getMaxColumns();
-  if (currentMax < minCols) {
-    sheet.insertColumnsAfter(currentMax, minCols - currentMax);
-  }
-}
-
-// ===== 報告日順の自動ソートと対象期間区切り行の再構築 =====
-
-/**
- * シート上に残っている対象期間の区切り行(A列がPERIOD_SEPARATOR_PREFIXで始まる行)を
- * すべて削除する。syncWeeklyReportsが新規ファイルを処理するたびに、この関数で古い
- * 区切り行を取り除いてからソート・再集計・再挿入することで、区切り行が常に1行だけ、
- * かつ先頭(2行目)に保たれる。
- */
-function removeExistingPeriodSeparatorRows_(targetSheet) {
-  const lastRow = targetSheet.getLastRow();
-  if (lastRow < 2) return;
-
-  const colAValues = targetSheet.getRange(2, 1, lastRow - 1, 1).getValues();
-  const rowsToDelete = [];
-  colAValues.forEach(function (row, idx) {
-    const value = String(row[0]);
-    if (value.indexOf(CONFIG.PERIOD_SEPARATOR_PREFIX) === 0) {
-      rowsToDelete.push(idx + 2);
-    }
-  });
-
-  // 行番号のズレを避けるため、後ろの行から削除する。
-  rowsToDelete.sort(function (a, b) { return b - a; });
-  rowsToDelete.forEach(function (rowNum) {
-    targetSheet.deleteRow(rowNum);
-  });
-}
-
-/**
- * 「週次報告記録」の2行目以降を「報告日」列(見つからなければI列=9列目)で昇順ソートする。
- * このソートは removeExistingPeriodSeparatorRows_ で区切り行を取り除いた後に呼ぶ前提だが、
- * 万一結合セルが残っていてもソートできるよう、念のためソート前に対象範囲の結合を解除する
- * (GASの仕様: 'You are trying to sort a range that contains merged cells')。
- */
-function sortWeeklyReportByReportDate_(targetSheet) {
-  const firstDataRow = 2;
-  const lastRow = targetSheet.getLastRow();
-  if (lastRow < firstDataRow) return;
-
-  const contentLastCol = targetSheet.getLastColumn();
-  const sortColumn = resolveReportDateColumn_(targetSheet, contentLastCol);
-  if (!sortColumn) {
-    Logger.log('報告日列が見つからないため、並べ替えをスキップします。');
-    return;
-  }
-
-  const dataRange = targetSheet.getRange(firstDataRow, 1, lastRow - firstDataRow + 1, contentLastCol);
-  dataRange.breakApart();
-  dataRange.sort({ column: sortColumn, ascending: true });
-}
-
-/**
- * ヘッダー行からREPORT_DATE_COLUMN_CANDIDATES(既定:「報告日」「日付」等)の順で列を探す。
- * どれも見つからない場合はREPORT_DATE_FALLBACK_COLUMN(既定: 9列目 = I列)を使う。
- */
-function resolveReportDateColumn_(targetSheet, lastCol) {
-  if (lastCol > 0) {
-    const headerRow = targetSheet.getRange(1, 1, 1, lastCol).getValues()[0]
-      .map(function (h) { return String(h).trim(); });
-    for (let c = 0; c < CONFIG.REPORT_DATE_COLUMN_CANDIDATES.length; c++) {
-      const idx = headerRow.indexOf(CONFIG.REPORT_DATE_COLUMN_CANDIDATES[c]);
-      if (idx !== -1) return idx + 1;
-    }
-  }
-  return CONFIG.REPORT_DATE_FALLBACK_COLUMN;
-}
-
-/**
- * シート全体のデータ(2行目以降)から対象期間(最小の報告日〜最大の報告日)を算出し、
- * 先頭(2行目)に区切り行として挿入する。ソート済みであることを前提とせず、シートの
- * 現在の内容だけから算出するため、常に「今シートにある全データを覆う最も広い期間」になる。
- */
-function insertPeriodSummaryRow_(targetSheet) {
-  const lastRow = targetSheet.getLastRow();
-  if (lastRow < 2) return;
-
-  const contentLastCol = targetSheet.getLastColumn();
-  const periodValue = computeOverallPeriodLabel_(targetSheet, contentLastCol, lastRow);
-
-  targetSheet.insertRowBefore(2);
-  const separatorRow = buildPeriodSeparatorRow_(periodValue, contentLastCol);
-  targetSheet.getRange(2, 1, 1, contentLastCol).setValues([separatorRow]);
-  formatPeriodSeparatorRow_(targetSheet, 2);
-}
-
-/**
- * シート全体のデータから対象期間を算出し、「2026/07/20 〜 2026/07/26」形式の文字列で返す。
- * まず「報告日」列(resolveReportDateColumn_)の値から最小値・最大値を求め、判定できない
- * 場合は「元ファイル名」列に含まれる日付(ファイル名パターン)からフォールバックする。
- * どちらからも判定できない場合は空文字を返す。
- * 毎週金曜日に報告を締める運用にあわせ、開始日・終了日はそれぞれの日付が属する
- * 「土曜日始まり・金曜日終わり」の週の土曜日・金曜日まで拡張する
- * (例: データが2026/07/28〜2026/07/30なら「2026/07/25 〜 2026/07/31」)。
- */
-function computeOverallPeriodLabel_(targetSheet, contentLastCol, lastRow) {
-  const dateColumn = resolveReportDateColumn_(targetSheet, contentLastCol);
-  const range = extractDateRangeFromColumn_(targetSheet, dateColumn, lastRow)
-    || extractDateRangeFromFileNameColumn_(targetSheet, contentLastCol, lastRow);
-  if (!range) return '';
-  return formatPeriod_(getSaturdayOfWeek_(range.min), getFridayOfWeek_(range.max));
-}
-
-/**
- * 指定日を含む週(土曜始まり・金曜終わり)の土曜日を返す。
- */
-function getSaturdayOfWeek_(date) {
-  const day = date.getDay(); // 0=日,1=月,2=火,...,6=土
-  const diffToSaturday = (day + 1) % 7;
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate() - diffToSaturday);
-}
-
-/**
- * 指定日を含む週(土曜始まり・金曜終わり)の金曜日を返す。
- */
-function getFridayOfWeek_(date) {
-  const day = date.getDay(); // 0=日,1=月,2=火,...,6=土
-  const diffToFriday = (12 - day) % 7;
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + diffToFriday);
-}
-
-/**
- * 指定列(2行目以降)の値をDateに変換し、その最小値・最大値を返す。判定できる値が
- * 1件もない場合はnullを返す。
- */
-function extractDateRangeFromColumn_(targetSheet, column, lastRow) {
-  if (!column) return null;
-  const values = targetSheet.getRange(2, column, lastRow - 1, 1).getValues();
-
-  let min = null;
-  let max = null;
-  values.forEach(function (row) {
-    const date = toDateValue_(row[0]);
-    if (!date) return;
-    if (!min || date.getTime() < min.getTime()) min = date;
-    if (!max || date.getTime() > max.getTime()) max = date;
-  });
-
-  return (min && max) ? { min: min, max: max } : null;
-}
-
-/**
- * 「元ファイル名」列(2行目以降)からファイル名パターンの日付を抽出し、その最小値・最大値を
- * 返す。「元ファイル名」列自体が見つからない場合、または判定できる値が1件もない場合はnullを返す。
- */
-function extractDateRangeFromFileNameColumn_(targetSheet, contentLastCol, lastRow) {
-  const headerRow = targetSheet.getRange(1, 1, 1, contentLastCol).getValues()[0]
-    .map(function (h) { return String(h).trim(); });
-  const fileNameCol = headerRow.indexOf('元ファイル名') + 1;
-  if (fileNameCol === 0) return null;
-
-  const values = targetSheet.getRange(2, fileNameCol, lastRow - 1, 1).getValues();
-
-  let min = null;
-  let max = null;
-  values.forEach(function (row) {
-    const bounds = extractDateBoundsFromFileName_(row[0]);
-    if (!bounds) return;
-    if (!min || bounds.start.getTime() < min.getTime()) min = bounds.start;
-    if (!max || bounds.end.getTime() > max.getTime()) max = bounds.end;
-  });
-
-  return (min && max) ? { min: min, max: max } : null;
-}
-
-/**
- * ファイル名に含まれる2つの8桁日付(yyyyMMdd)を開始日・終了日として取り出す。
- * 例: 報告一覧_20260720_20260726.xlsx → { start: 2026/07/20, end: 2026/07/26 }
- * 判定できない場合はnullを返す。
- */
-function extractDateBoundsFromFileName_(fileName) {
-  const base = String(fileName).replace(/\.[^.]+$/, '');
-  const match = base.match(/(\d{4})(\d{2})(\d{2}).*?(\d{4})(\d{2})(\d{2})/);
-  if (!match) return null;
-
-  const start = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-  const end = new Date(Number(match[4]), Number(match[5]) - 1, Number(match[6]));
-  if (isNaN(start.getTime()) || isNaN(end.getTime())) return null;
-
-  return { start: start, end: end };
 }
 
 /**
