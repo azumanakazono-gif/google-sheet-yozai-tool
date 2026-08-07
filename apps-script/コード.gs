@@ -226,8 +226,11 @@ function appendFileToTargetSheet_(file, targetSheet) {
   }
 
   if (values.length === 0) {
-    Logger.log('データなし: ' + file.getName());
-    return;
+    // 空のまま「処理済み」として静かに移動してしまうと、パースの取りこぼしに気づけない
+    // (ファイル自体は失われる)ため、エラーとして扱いエラーフォルダへ移動・通知の対象にする。
+    throw new Error(
+      'ファイルからデータを1行も読み取れませんでした。ANDPAD側の出力形式が変わっていないか確認してください。'
+    );
   }
 
   const hasHeader = CONFIG.SOURCE_HAS_HEADER;
@@ -238,8 +241,10 @@ function appendFileToTargetSheet_(file, targetSheet) {
   });
 
   if (dataRows.length === 0) {
-    Logger.log('データ行なし: ' + file.getName());
-    return;
+    // 上と同様、ヘッダー行しか読み取れなかった場合も静かにスキップせずエラーとして扱う。
+    throw new Error(
+      'ヘッダー行を除くとデータ行が1件もありませんでした。ANDPAD側の出力形式が変わっていないか確認してください。'
+    );
   }
 
   // CVR集計列(案件種別/属性/アプローチ日/面談日/提案日/契約日)は表記ゆれを吸収して正規化し、
@@ -443,38 +448,94 @@ function readValuesFromXlsxZip_(blob) {
 
 /**
  * ANDPAD等が「Excelファイル」と称して実際にはHTMLテーブルを出力しているケース向けの
- * フォールバック。複数の<table>がある場合は行数が最も多いものをデータ本体とみなす。
+ * フォールバック。以下の手順で、実際にデータが入っているテーブルを取りこぼしなく抽出する。
+ *   1. splitTopLevelTables_で最上位の<table>ブロックを入れ子を壊さずに分割する。
+ *      単純な非貪欲正規表現(<table[\s\S]*?<\/table>)は、テーブルが入れ子になっている場合
+ *      (レイアウト用の外側<table>の中に実データの<table>がある等)、内側の</table>で
+ *      打ち切られてしまい、実データを含む外側テーブルを正しく取得できないことがある。
+ *   2. 各ブロックについて実際に行・セルを抽出し、<tr>タグの出現数ではなく「値が入っている
+ *      行数」で比較して最もデータらしいブロックを選ぶ。タグの出現数だけで比較すると、
+ *      見た目のレイアウト目的の(値の少ない)テーブルの方が<tr>数が多く、誤って選ばれることがある。
  * XmlServiceでの厳密なXMLパースはHTMLの崩れ(閉じタグ漏れ等)で失敗しやすいため、
  * 正規表現ベースの緩いパースで抽出する。
  */
 function readValuesFromHtmlTable_(html) {
-  const tableBlocks = html.match(/<table[\s\S]*?<\/table>/gi) || [html];
-  let bestBlock = tableBlocks[0];
-  let bestRowCount = -1;
+  const tableBlocks = splitTopLevelTables_(html);
+  if (tableBlocks.length === 0) return [];
+
+  let bestRows = null;
+  let bestScore = -1;
   tableBlocks.forEach(function (block) {
-    const rowCount = (block.match(/<tr[\s>]/gi) || []).length;
-    if (rowCount > bestRowCount) {
-      bestRowCount = rowCount;
-      bestBlock = block;
+    const rows = extractRowsFromTableHtml_(block);
+    const populatedRowCount = rows.filter(function (row) {
+      return row.some(function (cell) { return cell !== ''; });
+    }).length;
+    if (populatedRowCount > bestScore) {
+      bestScore = populatedRowCount;
+      bestRows = rows;
     }
   });
 
-  const rowMatches = bestBlock.match(/<tr[\s\S]*?<\/tr>/gi) || [];
-  const rows = rowMatches.map(function (rowHtml) {
-    const cellMatches = rowHtml.match(/<t[dh][\s\S]*?<\/t[dh]>/gi) || [];
-    return cellMatches.map(function (cellHtml) {
-      const inner = cellHtml.replace(/^<t[dh][^>]*>/i, '').replace(/<\/t[dh]>$/i, '');
-      const withBreaks = inner.replace(/<br\s*\/?>/gi, '\n');
-      const stripped = withBreaks.replace(/<[^>]+>/g, '');
-      return decodeHtmlEntities_(stripped).trim();
-    });
-  });
-
+  const rows = bestRows || [];
   const maxCol = rows.reduce(function (max, r) { return Math.max(max, r.length); }, 0);
   return rows.map(function (row) {
     const padded = row.slice();
     while (padded.length < maxCol) padded.push('');
     return padded;
+  });
+}
+
+/**
+ * htmlのうち最上位(トップレベル)の<table>...</table>ブロックを、開閉タグの深さを数えながら
+ * 分割する。<table>が入れ子になっている場合でも、外側の開始タグから対応する外側の終了タグ
+ * までを1ブロックとして正しく切り出す(非貪欲な正規表現では内側の</table>で打ち切られてしまう)。
+ */
+function splitTopLevelTables_(html) {
+  const tagRe = /<table\b[^>]*>|<\/table\s*>/gi;
+  const blocks = [];
+  let depth = 0;
+  let start = -1;
+  let match;
+  while ((match = tagRe.exec(html)) !== null) {
+    const isCloseTag = match[0].charAt(1) === '/';
+    if (!isCloseTag) {
+      if (depth === 0) start = match.index;
+      depth++;
+    } else if (depth > 0) {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        blocks.push(html.slice(start, match.index + match[0].length));
+        start = -1;
+      }
+    }
+  }
+  return blocks;
+}
+
+/**
+ * 1つの<table>ブロック(内部に入れ子テーブルを含んでもよい)から<tr>単位で行・セルを抽出する。
+ * colspan指定があるセルは、その回数だけ同じ値を繰り返して列位置のズレを抑える
+ * (rowspanは複雑になるため非対応。ANDPAD側の一覧データ出力では通常使われない)。
+ */
+function extractRowsFromTableHtml_(tableHtml) {
+  const rowMatches = tableHtml.match(/<tr[\s\S]*?<\/tr>/gi) || [];
+  return rowMatches.map(function (rowHtml) {
+    const cellMatches = rowHtml.match(/<t[dh][\s\S]*?<\/t[dh]>/gi) || [];
+    const cells = [];
+    cellMatches.forEach(function (cellHtml) {
+      const openTagMatch = cellHtml.match(/^<t[dh][^>]*>/i);
+      const openTag = openTagMatch ? openTagMatch[0] : '';
+      const colspanMatch = openTag.match(/colspan\s*=\s*["']?(\d+)/i);
+      const colspan = colspanMatch ? Math.max(1, parseInt(colspanMatch[1], 10)) : 1;
+
+      const inner = cellHtml.replace(/^<t[dh][^>]*>/i, '').replace(/<\/t[dh]>$/i, '');
+      const withBreaks = inner.replace(/<br\s*\/?>/gi, '\n');
+      const stripped = withBreaks.replace(/<[^>]+>/g, '');
+      const value = decodeHtmlEntities_(stripped).trim();
+
+      for (let i = 0; i < colspan; i++) cells.push(value);
+    });
+    return cells;
   });
 }
 
