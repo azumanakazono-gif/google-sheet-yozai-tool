@@ -7,6 +7,9 @@
  * コンテナバインド型スクリプトとして設置されている場合のみ(スタンドアロン型では発火しない)。
  * 「拡張機能 > Apps Script」から「31期予材リスト」スプレッドシートに紐づく形でスクリプトを
  * 開いていれば、このシンプルトリガー(onEdit)は追加設定なしで自動的に動作する。
+ *
+ * getBoundSpreadsheet_()はWeeklySync.gs側で定義されている(同一GASプロジェクト内なら
+ * ファイルをまたいで参照できる)。分割ファイル版はWeeklySync.gsと必ず併用すること。
  */
 
 /**
@@ -20,6 +23,20 @@ function onEdit(e) {
     handleEdit_(e);
   } catch (err) {
     Logger.log('onEdit処理でエラーが発生しました: ' + err);
+    notifyEditError_(err);
+  }
+}
+
+/**
+ * onEdit中の例外はGASのUIダイアログ(getUi().alert等)を出せないため、代わりにtoastで
+ * スプレッドシート右下にエラーを表示する。Logger.logだけに埋もれて気づけなくなる
+ * (「編集しても何も起きないように見える」)事態を防ぐ。
+ */
+function notifyEditError_(err) {
+  try {
+    SpreadsheetApp.getActiveSpreadsheet().toast(String(err), '編集時処理でエラーが発生しました', 10);
+  } catch (toastErr) {
+    Logger.log('エラー通知(toast)にも失敗しました: ' + toastErr);
   }
 }
 
@@ -123,7 +140,7 @@ function appendEditToWeeklyReport_(sourceSheet, row, targetSheet) {
  * 「週次ステータス変更履歴」シートを取得する。存在しない場合は作成し、ヘッダーを設定する。
  */
 function getStatusHistorySheet_() {
-  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  const ss = getBoundSpreadsheet_();
   let sheet = ss.getSheetByName(CONFIG.STATUS_HISTORY_SHEET_NAME);
   if (!sheet) {
     sheet = ss.insertSheet(CONFIG.STATUS_HISTORY_SHEET_NAME);
@@ -261,7 +278,7 @@ function applyProjectLinksToStatusHistory() {
  * EDIT_SHEET_NAME_KEYWORD(既定:「今月」)を含む最初のシートを返す。見つからない場合はnull。
  */
 function findMonthlySheet_() {
-  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  const ss = getBoundSpreadsheet_();
   const sheets = ss.getSheets();
   for (let i = 0; i < sheets.length; i++) {
     if (sheets[i].getName().indexOf(CONFIG.EDIT_SHEET_NAME_KEYWORD) !== -1) return sheets[i];
