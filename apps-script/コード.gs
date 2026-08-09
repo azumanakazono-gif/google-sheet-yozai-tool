@@ -762,8 +762,33 @@ function getOrCreateSubFolder_(parentFolder, name) {
   return parentFolder.createFolder(name);
 }
 
+/**
+ * このスクリプトがバインドされているスプレッドシートを返す。
+ *
+ * 【重要】SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID) をonEdit(e)経由の呼び出し
+ * (getTargetSheet_ / getStatusHistorySheet_ / findMonthlySheet_)で使わないこと。
+ * onEdit(e)はシンプルトリガーとして実行され認可(authorization)が一切ない状態で動くため、
+ * 対象が同じファイルであってもID指定でスプレッドシートを開く操作は例外になる。その例外は
+ * onEdit側でLogger.logされるだけで画面上には何も表示されず、「今月」シートのO列(見込確度)を
+ * 編集しても報告記録・週次ステータス変更履歴への追記や案件名リンクのコピーが一切発生しない、
+ * という不具合の原因になっていた。getActiveSpreadsheet()はコンテナバインド型スクリプトで
+ * あれば認可不要で使え、時間主導型トリガー・シンプルトリガーいずれの実行コンテキストでも
+ * バインド先のファイルを返すため、こちらを使う。
+ */
+function getBoundSpreadsheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (ss.getId() !== CONFIG.TARGET_SPREADSHEET_ID) {
+    throw new Error(
+      'このスクリプトは想定外のスプレッドシート(id: ' + ss.getId() + ')にバインドされています。' +
+        '「31期予材リスト」(id: ' + CONFIG.TARGET_SPREADSHEET_ID + ')に紐づいたコンテナバインド型' +
+        'プロジェクトとして設置してください。'
+    );
+  }
+  return ss;
+}
+
 function getTargetSheet_() {
-  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  const ss = getBoundSpreadsheet_();
   let sheet = ss.getSheetByName(CONFIG.TARGET_SHEET_NAME);
   if (!sheet) {
     sheet = ss.insertSheet(CONFIG.TARGET_SHEET_NAME);
@@ -793,6 +818,20 @@ function onEdit(e) {
     handleEdit_(e);
   } catch (err) {
     Logger.log('onEdit処理でエラーが発生しました: ' + err);
+    notifyEditError_(err);
+  }
+}
+
+/**
+ * onEdit中の例外はGASのUIダイアログ(getUi().alert等)を出せないため、代わりにtoastで
+ * スプレッドシート右下にエラーを表示する。Logger.logだけに埋もれて気づけなくなる
+ * (「編集しても何も起きないように見える」)事態を防ぐ。
+ */
+function notifyEditError_(err) {
+  try {
+    SpreadsheetApp.getActiveSpreadsheet().toast(String(err), '編集時処理でエラーが発生しました', 10);
+  } catch (toastErr) {
+    Logger.log('エラー通知(toast)にも失敗しました: ' + toastErr);
   }
 }
 
@@ -896,7 +935,7 @@ function appendEditToWeeklyReport_(sourceSheet, row, targetSheet) {
  * 「週次ステータス変更履歴」シートを取得する。存在しない場合は作成し、ヘッダーを設定する。
  */
 function getStatusHistorySheet_() {
-  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  const ss = getBoundSpreadsheet_();
   let sheet = ss.getSheetByName(CONFIG.STATUS_HISTORY_SHEET_NAME);
   if (!sheet) {
     sheet = ss.insertSheet(CONFIG.STATUS_HISTORY_SHEET_NAME);
@@ -1034,7 +1073,7 @@ function applyProjectLinksToStatusHistory() {
  * EDIT_SHEET_NAME_KEYWORD(既定:「今月」)を含む最初のシートを返す。見つからない場合はnull。
  */
 function findMonthlySheet_() {
-  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  const ss = getBoundSpreadsheet_();
   const sheets = ss.getSheets();
   for (let i = 0; i < sheets.length; i++) {
     if (sheets[i].getName().indexOf(CONFIG.EDIT_SHEET_NAME_KEYWORD) !== -1) return sheets[i];
