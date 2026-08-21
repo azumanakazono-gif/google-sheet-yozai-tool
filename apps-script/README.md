@@ -89,6 +89,7 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 
 - **`TypeError: Drive.Files.create is not a function` / `Bad Request` (Drive.Files.insert)**: いずれも過去のバージョンでAdvanced Drive Service経由のExcel変換を使っていた際に、GASエディタの「サービス」で追加したバージョン(v2/v3)やAPIの呼び出し方の不一致で発生していたエラー。現在のコードはAdvanced Drive Service・Drive REST API・UrlFetchAppを一切使わず、`Utilities.unzip`と`XmlService`だけで.xlsxを直接パースするため、これらのエラーは原理的に発生しない。
 - **`Exception: Service Spreadsheets failed while accessing document with id ...`**: 対象ファイルのmimeTypeが`application/vnd.google-apps.spreadsheet`(Googleスプレッドシート)と判定されたにもかかわらず、そのIDをGoogleスプレッドシートとして開けなかった場合に発生する。多くの場合、GAS側のコードが最新版に更新されておらず、貼り付け時にコードの一部が古いまま残っている（後述の構文エラーと同根の問題）。まずコード全体を最新版で完全に置き換えてから再実行すること。
+- **`Exception: セル ... に入力したデータは、このセルで設定しているデータの入力規則に違反しています。`**: 「週次報告記録」シートの列(例: 商材区分)にプルダウン等のデータ入力規則(リスト検証)が設定されている場合、元データにそのリストにない値が含まれていると`setValues`が例外を投げ、追記全体が失敗する。これを避けるため、`appendFileToTargetSheet_`は追記範囲へ書き込む直前に`writeValuesIgnoringValidation_`でその範囲の入力規則を一時的にクリアし、書き込み後すぐに元の規則を復元する(Sheetsの入力規則は入力時のみ検証され、既存セルに規則を再設定しても遡って再検証されないため、復元してもエラーにはならず、以降の手入力用プルダウンはそのまま使える)。このガードは`WeeklySync.gs`/`コード.gs`の両方に入っているため、リスト外の値があっても追記自体は弾かれない。
 - **コード末尾に余計な記号や関数の重複が混入し保存できない**: チャットの表示上は問題なくても、コピー範囲や貼り付けタイミングによって末尾に余分な文字が残ることがある。対処手順:
   1. GASエディタで対象ファイルを開き、`Ctrl+A`（Mac: `Cmd+A`）で全選択して`Delete`し、**空になったことを目視で確認**する。
   2. このリポジトリの`コード.gs`をテキストエディタ等で開いて中身を全コピーし、貼り付ける。

@@ -127,7 +127,25 @@ function appendFileToTargetSheet_(file, targetSheet) {
   });
 
   const lastRow = targetSheet.getLastRow();
-  targetSheet.getRange(lastRow + 1, 1, rowsToAppend.length, totalCols).setValues(rowsToAppend);
+  const appendRange = targetSheet.getRange(lastRow + 1, 1, rowsToAppend.length, totalCols);
+  writeValuesIgnoringValidation_(appendRange, rowsToAppend);
+}
+
+/**
+ * データ入力規則(プルダウン等のリスト検証)が設定された範囲でも、リスト外の値を含む
+ * 元データの追記が「入力規則違反」で失敗しないようにする。
+ * 対象範囲の入力規則を一時的にクリアしてから値を書き込み、直後に元の規則を復元する。
+ * (Sheetsの入力規則は入力時にのみ検証され、既存セルへ規則を再設定しても遡って
+ * 再検証はされないため、復元後もエラーにはならず、プルダウン自体は維持される)
+ */
+function writeValuesIgnoringValidation_(range, values) {
+  const existingValidations = range.getDataValidations();
+  range.clearDataValidations();
+  try {
+    range.setValues(values);
+  } finally {
+    range.setDataValidations(existingValidations);
+  }
 }
 
 /**
