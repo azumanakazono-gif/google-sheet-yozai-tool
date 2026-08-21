@@ -4,8 +4,8 @@
  *
  * - Excelファイルは DriveApp + Utilities.unzip + XmlService のみで直接パースする（Advanced Drive
  *   Service、UrlFetchApp、外部API呼び出しは一切使わない）。ANDPAD等の「拡張子は.xlsxだが中身は
- *   標準ZIPではない(HTMLテーブル等)」出力にも対応するため、先頭バイトで実体を判別し、
- *   ZIP/.xlsx・HTMLテーブルの2通りの読み取り方法へ自動でフォールバックする。
+ *   標準ZIPではない(HTMLテーブルやCSV/TSV等)」出力にも対応するため、先頭バイトや中身のテキストで
+ *   実体を判別し、ZIP/.xlsx・HTMLテーブル・CSV/TSVの読み取り方法へ自動でフォールバックする。
  * - 列はヘッダー名でマッチングして書き込むため、ANDPAD側の列順変更や列追加（フォーマットの揺れ）に強い。
  * - 転記済みファイルは「処理済み」フォルダへ移動し、同名ファイルがあればリネームして衝突を回避する。
  * - 万一の移動失敗に備え、処理済みファイルIDをプロパティに記録し、再走時の二重追記を防ぐ。
@@ -90,7 +90,7 @@ function appendFileToTargetSheet_(file, targetSheet) {
       throw new Error('Googleスプレッドシートとして開けませんでした(id: ' + file.getId() + ')。詳細: ' + e);
     }
   } else {
-    values = readXlsxAsValues_(file);
+    values = parseWeeklyReportFile_(file);
   }
 
   if (values.length === 0) {
@@ -164,37 +164,64 @@ function ensureColumnsExist_(targetSheet, headerNames) {
 }
 
 /**
- * DriveAppとGAS標準サービスだけでExcelファイルを読み取り、
+ * DriveAppとGAS標準サービスだけで週次報告ファイルを読み取り、
  * SpreadsheetApp.getDataRange().getValues()相当の2次元配列を返す。
  * Advanced Drive Service・UrlFetchApp・外部API呼び出しは一切使わない。
  *
- * ANDPAD等の出力は「拡張子は.xlsxだが中身は標準ZIP構造ではない」ケースがあるため、
- * ファイル先頭のマジックバイトで実体を判別し、3通りの読み取り方法にフォールバックする。
+ * ANDPAD等の出力は「拡張子は.xlsxだが中身は標準ZIP構造ではない」「実体はCSV/TSVや
+ * HTMLテーブル」等のケースがあるため、ファイル先頭のマジックバイトや中身のテキストで
+ * 実体を判別し、以下の順にフォールバックする。途中の形式でのパースに失敗しても即エラー
+ * にはせず、ログを残して次の形式を試す。
  *   1. 本物の.xlsx(ZIP構造): Utilities.unzip + XmlServiceで直接パース。
  *   2. 旧形式バイナリ.xls(OLE構造): パース不可のため、その旨を明確なエラーで通知する。
  *   3. HTMLテーブルを.xlsx/.xlsとして出力している場合: <table>をHTMLとして解析する。
+ *   4. CSV/TSVをテキストとして出力している場合: 区切り文字(カンマ/タブ)を自動判定し、
+ *      ダブルクォート囲み・エスケープにも対応した簡易CSVパーサで解析する。
+ * どの形式にも当てはまらない場合は、原因調査用に検出したContentTypeと先頭バイトを
+ * 含むエラーを投げる。
  */
-function readXlsxAsValues_(file) {
+function parseWeeklyReportFile_(file) {
   const blob = file.getBlob();
   const bytes = blob.getBytes();
 
   if (looksLikeZip_(bytes)) {
-    return readValuesFromXlsxZip_(blob);
+    try {
+      return parseXlsxZipDirectly_(blob);
+    } catch (zipErr) {
+      Logger.log(
+        'parseXlsxZipDirectly_ 失敗、HTMLフォールバックを試みます: ' + file.getName() + ' (' + zipErr + ')'
+      );
+    }
   }
 
   if (looksLikeLegacyOle_(bytes)) {
     throw new Error(
-      '旧形式のバイナリExcelファイル(.xls, Excel 97-2003形式)は読み取れません。.xlsx形式で保存し直してください。'
+      '旧形式のバイナリExcelファイル(.xls, Excel 97-2003形式)は読み取れません。' +
+        '.xlsxまたはCSV形式で保存し直してください。(ファイル: ' + file.getName() + ')'
     );
   }
 
   const text = decodeTextBlob_(blob);
+
   if (/<html[\s>]|<table[\s>]/i.test(text.slice(0, 4000))) {
-    return readValuesFromHtmlTable_(text);
+    try {
+      return parseHtmlTableBlob_(text);
+    } catch (htmlErr) {
+      Logger.log(
+        'parseHtmlTableBlob_ 失敗、CSVフォールバックを試みます: ' + file.getName() + ' (' + htmlErr + ')'
+      );
+    }
+  }
+
+  if (looksLikeCsvText_(text)) {
+    return parseCsvBlob_(text);
   }
 
   throw new Error(
-    '対応していないファイル形式です(ZIP/.xlsxでもHTMLでもありません)。ANDPAD側の出力設定やファイルの破損を確認してください。'
+    'サポートされていないファイル形式です(ZIP/.xlsx・HTML・CSVのいずれでもありません)。' +
+      'ファイル: ' + file.getName() +
+      ' / ContentType: ' + blob.getContentType() +
+      ' / 先頭バイト: ' + bytesToHexPreview_(bytes)
   );
 }
 
@@ -218,23 +245,49 @@ function looksLikeLegacyOle_(bytes) {
 }
 
 /**
+ * テキストの先頭数行にカンマまたはタブが含まれるかどうかで、CSV/TSVらしさを判定する。
+ * (HTML判定・ZIP判定・OLE判定のいずれにも当てはまらなかった場合の最終フォールバックとして使う)
+ */
+function looksLikeCsvText_(text) {
+  const lines = text.split(/\r\n|\r|\n/).slice(0, 5).filter(function (line) {
+    return line.trim() !== '';
+  });
+  if (lines.length === 0) return false;
+  return lines.some(function (line) {
+    return line.indexOf(',') !== -1 || line.indexOf('\t') !== -1;
+  });
+}
+
+/**
+ * バイト列先頭16バイトを16進数プレビュー文字列にする(未対応形式のエラー診断用)。
+ */
+function bytesToHexPreview_(bytes) {
+  return bytes.slice(0, 16).map(function (b) {
+    const unsigned = b < 0 ? b + 256 : b;
+    const hex = unsigned.toString(16).toUpperCase();
+    return hex.length === 1 ? '0' + hex : hex;
+  }).join(' ');
+}
+
+/**
  * blobのテキストをUTF-8で読み、内部にShift_JIS系のcharset宣言が見つかればShift_JISで読み直す。
- * (ANDPAD等、日本語業務システムのHTML書き出しはShift_JISであることが多いため)
+ * (ANDPAD等、日本語業務システムのHTML/CSV書き出しはShift_JISであることが多いため)
+ * 先頭のUTF-8 BOMが付いている場合は取り除く。
  */
 function decodeTextBlob_(blob) {
   const utf8Text = blob.getDataAsString('UTF-8');
   const metaMatch = utf8Text.slice(0, 2000).match(/charset\s*=\s*["']?([\w-]+)/i);
   const charset = metaMatch ? metaMatch[1].toLowerCase() : '';
-  if (/shift[-_]?jis|sjis|ms932|windows-31j/.test(charset)) {
-    return blob.getDataAsString('Shift_JIS');
-  }
-  return utf8Text;
+  const text = /shift[-_]?jis|sjis|ms932|windows-31j/.test(charset)
+    ? blob.getDataAsString('Shift_JIS')
+    : utf8Text;
+  return text.replace(/^\uFEFF/, '');
 }
 
 /**
  * 本物の.xlsx(ZIP構造)をUtilities.unzip + XmlServiceで直接パースする。
  */
-function readValuesFromXlsxZip_(blob) {
+function parseXlsxZipDirectly_(blob) {
   const zipBlob = blob.setContentType('application/zip');
   let entries;
   try {
@@ -265,8 +318,10 @@ function readValuesFromXlsxZip_(blob) {
  * フォールバック。複数の<table>がある場合は行数が最も多いものをデータ本体とみなす。
  * XmlServiceでの厳密なXMLパースはHTMLの崩れ(閉じタグ漏れ等)で失敗しやすいため、
  * 正規表現ベースの緩いパースで抽出する。
+ * <tr>を1件も抽出できなかった場合はエラーを投げ、呼び出し元でCSVフォールバックに
+ * つなげられるようにする。
  */
-function readValuesFromHtmlTable_(html) {
+function parseHtmlTableBlob_(html) {
   const tableBlocks = html.match(/<table[\s\S]*?<\/table>/gi) || [html];
   let bestBlock = tableBlocks[0];
   let bestRowCount = -1;
@@ -279,6 +334,10 @@ function readValuesFromHtmlTable_(html) {
   });
 
   const rowMatches = bestBlock.match(/<tr[\s\S]*?<\/tr>/gi) || [];
+  if (rowMatches.length === 0) {
+    throw new Error('HTMLとして解析できる<table>/<tr>が見つかりませんでした。');
+  }
+
   const rows = rowMatches.map(function (rowHtml) {
     const cellMatches = rowHtml.match(/<t[dh][\s\S]*?<\/t[dh]>/gi) || [];
     return cellMatches.map(function (cellHtml) {
@@ -288,6 +347,94 @@ function readValuesFromHtmlTable_(html) {
       return decodeHtmlEntities_(stripped).trim();
     });
   });
+
+  const maxCol = rows.reduce(function (max, r) { return Math.max(max, r.length); }, 0);
+  return rows.map(function (row) {
+    const padded = row.slice();
+    while (padded.length < maxCol) padded.push('');
+    return padded;
+  });
+}
+
+/**
+ * CSV/TSVテキストを2次元配列にパースする。区切り文字は先頭行のカンマ/タブの出現数で
+ * 自動判定する。ダブルクォート囲み・囲み内のカンマ/改行・""によるエスケープに対応した
+ * 簡易パーサ(RFC4180相当)。
+ */
+function parseCsvBlob_(text) {
+  const delimiter = detectCsvDelimiter_(text);
+  return parseDelimitedText_(text, delimiter);
+}
+
+/**
+ * テキスト先頭行のカンマ数とタブ数を比較し、区切り文字を推定する。
+ */
+function detectCsvDelimiter_(text) {
+  const firstLine = text.split(/\r\n|\r|\n/)[0] || '';
+  const commaCount = (firstLine.match(/,/g) || []).length;
+  const tabCount = (firstLine.match(/\t/g) || []).length;
+  return tabCount > commaCount ? '\t' : ',';
+}
+
+/**
+ * 指定した区切り文字でテキストを2次元配列にパースする(ダブルクォート対応)。
+ * 各行の列数は最大列数に合わせて空文字でパディングする。
+ */
+function parseDelimitedText_(text, delimiter) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+  let i = 0;
+  const len = text.length;
+
+  while (i < len) {
+    const ch = text.charAt(i);
+
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text.charAt(i + 1) === '"') {
+          field += '"';
+          i += 2;
+        } else {
+          inQuotes = false;
+          i++;
+        }
+      } else {
+        field += ch;
+        i++;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inQuotes = true;
+      i++;
+    } else if (ch === delimiter) {
+      row.push(field);
+      field = '';
+      i++;
+    } else if (ch === '\r' || ch === '\n') {
+      if (ch === '\r' && text.charAt(i + 1) === '\n') i++;
+      row.push(field);
+      field = '';
+      rows.push(row);
+      row = [];
+      i++;
+    } else {
+      field += ch;
+      i++;
+    }
+  }
+
+  if (field !== '' || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+
+  while (rows.length > 0 && rows[rows.length - 1].every(function (cell) { return cell === ''; })) {
+    rows.pop();
+  }
 
   const maxCol = rows.reduce(function (max, r) { return Math.max(max, r.length); }, 0);
   return rows.map(function (row) {
@@ -471,12 +618,14 @@ function isSupportedSpreadsheet_(file) {
   if (
     mimeType === MimeType.GOOGLE_SHEETS ||
     mimeType === MimeType.MICROSOFT_EXCEL ||
-    mimeType === 'application/vnd.ms-excel'
+    mimeType === 'application/vnd.ms-excel' ||
+    mimeType === MimeType.CSV ||
+    mimeType === 'text/csv'
   ) {
     return true;
   }
   const name = file.getName().toLowerCase();
-  return name.endsWith('.xlsx') || name.endsWith('.xls');
+  return name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv') || name.endsWith('.tsv');
 }
 
 /**
