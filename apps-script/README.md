@@ -1,7 +1,8 @@
 # 週次予材リスト同期スクリプト (Google Apps Script)
 
 Google Driveフォルダ内のExcel/スプレッドシートを読み取り、「31期予材リスト」スプレッドシートの
-「週次報告記録」シート末尾に自動追記するGASスクリプトです。
+「週次報告記録」シート末尾に自動追記するGASスクリプトです。追記と連動して、見込確度が変化した
+案件だけを「週次ステータス変更履歴」シートにも自動記録します。
 
 - 取得元フォルダ: `1WrjMUtIpe2JEwChiJygRs1TeqWGgPuyc`
 - 追記先スプレッドシート: `1zTz2lLUD6M4SPBCcEO3OBxNMmv1U7RsUYRJhkKkgOOQ`（シート「週次報告記録」）
@@ -34,6 +35,58 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 6. 読み取りや書き込みに失敗したファイルは `エラー` サブフォルダへ移動し、`NOTIFY_EMAIL` を設定していればエラー内容をメール通知する。
 
 `処理済み`・`エラー` フォルダは `SOURCE_FOLDER_ID` の直下に初回実行時に自動作成されます。
+
+## 週次ステータス変更履歴の自動記録
+
+「週次報告記録」への追記が完了する**たびに**(`appendFileToTargetSheet_`の中で)、直後に
+`updateWeeklyStatusHistory_`が連動して呼ばれ、「週次ステータス変更履歴」シートを更新します。
+
+1. 今回追記した行(直近の取り込み分)を、追記前に既に「週次報告記録」にあった行と
+   **案件名**(`CONFIG.STATUS_HISTORY_KEY_COLUMN_CANDIDATES`)で突き合わせる。
+2. **見込確度**(`CONFIG.STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES`)が変更前後で
+   変化した案件だけを転記対象として抽出する(変化していない案件・今回が初登場の案件は対象外)。
+3. 対象案件について、記録日時・担当・案件名・カテゴリ・次回アクション予定日時・
+   ネクストアクション・変更前後の見込確度・変更経緯・最新見積格納日・契約見込月・
+   税込想定売上を「週次ステータス変更履歴」シートの末尾に追記する(`CONFIG.STATUS_HISTORY_COLUMNS`)。
+   列は名前でマッチングするため、既存シートの列順が変わっていても正しい列に入る。
+4. **昇降フラグ列(既定では「昇降フラグ」列名、G列を想定)には値を書き込まない。**
+   この列は「変更前見込確度」「変更後見込確度」を比較して↑/↓を算出するスプレッドシート側の
+   数式が元々セットされている前提のため、GAS側は直前の既存行(数式が入っているセル)から
+   `Range.copyTo(..., SpreadsheetApp.CopyPasteType.PASTE_FORMULA, false)` で数式だけを
+   新規追記行にコピーする(`applyRankFlagFormula_`)。既存行に数式が無い場合は
+   コピー元が無いためスキップされ、ログにその旨が出力される(その場合はいずれか1行に
+   手動で数式を設定すれば、以降の実行から自動でコピーされるようになる)。
+5. **案件名セル(C列)には、既存シートの見た目に合わせたリンク付きリッチテキストを設定する。**
+   フォントカラーは`CONFIG.STATUS_HISTORY_LINK_COLOR`(既定 `#1155cc`、Google Sheetsの
+   リンク標準色)、下線ありのスタイルを`SpreadsheetApp.newRichTextValue()`で組み立て、
+   `Range.setRichTextValues()`でまとめて反映する(`applyProjectNameLinks_` /
+   `buildProjectNameRichText_`)。リンク先は「週次報告記録」の該当行への
+   スプレッドシート内部リンク(`#gid=<sheetId>&range=A<行番号>`)とし、案件名をクリックすると
+   その案件の最新の取り込み行にジャンプできるようにしている。
+   **このリンク先URLは実物のシートを直接確認できない状態での実装上の判断であり、
+   もし既存の案件名リンクが外部システム(ANDPAD等)のURLを指している場合は、
+   `updateWeeklyStatusHistory_`内の`reportRowLink`の組み立て方を、その実際のURLを
+   参照する形に差し替えること。**
+6. 履歴記録自体が失敗しても「週次報告記録」への追記は成功として扱う(`appendFileToTargetSheet_`が
+   `try/catch`で握りつぶし、ログにのみ記録する)。
+
+**実際のANDPAD出力・スプレッドシートの列名に合わせて`Config.gs`(または`コード.gs`のCONFIG)の
+以下の設定値を確認・調整すること**(実物のシートを直接確認できない状態で実装しているため、
+既定値はあくまで一般的な想定に基づく):
+
+- `STATUS_HISTORY_SHEET_NAME`: 履歴シート名(既定 `週次ステータス変更履歴`)
+- `STATUS_HISTORY_COLUMNS`: 履歴シートの列構成(既定 記録日時・担当・案件名・カテゴリ・
+  次回アクション予定日時・ネクストアクション・昇降フラグ・変更前見込確度・変更後見込確度・
+  変更経緯・最新見積格納日・契約見込月・税込想定売上)
+- `STATUS_HISTORY_RANK_FLAG_COLUMN`: 数式で↑/↓を算出する昇降フラグ列の名前
+- `STATUS_HISTORY_LINK_COLOR`: 案件名リンクのフォントカラー(既定 `#1155cc`)
+- `STATUS_HISTORY_KEY_COLUMN_CANDIDATES`: 「週次報告記録」側で案件を一意に識別する列名候補
+- `STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES`: 転記条件となる「見込確度」列の名前候補
+- `STATUS_HISTORY_FIELD_SOURCE_COLUMNS`: 履歴シートの各列に「週次報告記録」側のどの列名を
+  転記するかの対応表
+
+案件識別列または見込確度列が「週次報告記録」に見つからない場合は、履歴記録全体をスキップし
+ログにその旨を出力する(「週次報告記録」への追記自体は通常どおり成功する)。
 
 ## セットアップ手順
 

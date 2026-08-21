@@ -127,8 +127,265 @@ function appendFileToTargetSheet_(file, targetSheet) {
   });
 
   const lastRow = targetSheet.getLastRow();
+  // 変更検知は「今回追記する内容」と「追記前に既にシートにあった内容」を比較するため、
+  // 追記より前にこの時点の既存データを読み取っておく。
+  const previousRows = lastRow > 1
+    ? targetSheet.getRange(2, 1, lastRow - 1, totalCols).getValues()
+    : [];
+
   const appendRange = targetSheet.getRange(lastRow + 1, 1, rowsToAppend.length, totalCols);
   writeValuesIgnoringValidation_(appendRange, rowsToAppend);
+
+  try {
+    updateWeeklyStatusHistory_(targetSheet, lastRow, headerMap, previousRows, rowsToAppend, timestamp);
+  } catch (historyErr) {
+    // 履歴記録の失敗は「報告記録」への追記そのものを失敗させたくないため、ここで握りつぶす。
+    Logger.log(
+      '週次ステータス変更履歴の更新に失敗しました(報告記録への追記自体は成功しています): ' +
+        file.getName() + ' / ' + historyErr
+    );
+  }
+}
+
+/**
+ * 「週次報告記録」への直近の追記分(newRows)を、追記前の既存データ(previousRows)と
+ * 案件単位で突き合わせ、「見込確度」(CONFIG.STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES)が
+ * 変更前後で変化した案件だけを抽出して「週次ステータス変更履歴」シートの末尾に記録する。
+ * (ステータスや進捗など見込確度以外の変更は転記対象にしない)
+ * 案件を識別するキー列や見込確度列が「週次報告記録」に存在しない場合は、何もせずスキップする。
+ * reportSheet・reportLastRow(追記前の最終行)は、履歴側の案件名セルに「週次報告記録」の
+ * 該当行へ飛べるリンクを張るために使う(リンク自体の見た目はbuildStatusHistoryChange_を参照)。
+ */
+function updateWeeklyStatusHistory_(reportSheet, reportLastRow, headerMap, previousRows, newRows, timestamp) {
+  const keyCol = findHeaderColumnIndex_(headerMap, CONFIG.STATUS_HISTORY_KEY_COLUMN_CANDIDATES);
+  const confidenceCol = findHeaderColumnIndex_(headerMap, CONFIG.STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES);
+
+  if (!keyCol || !confidenceCol) {
+    Logger.log(
+      '週次ステータス変更履歴: 案件識別列(' + CONFIG.STATUS_HISTORY_KEY_COLUMN_CANDIDATES.join('/') +
+        ')または見込確度列(' + CONFIG.STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES.join('/') +
+        ')が「' + CONFIG.TARGET_SHEET_NAME + '」に見つからないため、変更履歴の記録をスキップします。'
+    );
+    return;
+  }
+
+  // 案件(キー列の値)ごとに「直前の状態」を引けるようにする。同じ案件が複数行あっても、
+  // 後の行で上書きされるため常に最後に登場した行が残る。
+  const previousByKey = {};
+  previousRows.forEach(function (row) {
+    const key = String(row[keyCol - 1]).trim();
+    if (key === '') return;
+    previousByKey[key] = row;
+  });
+
+  const reportSheetId = reportSheet.getSheetId();
+  const changes = [];
+  newRows.forEach(function (row, index) {
+    const key = String(row[keyCol - 1]).trim();
+    if (key === '') return;
+
+    const previousRow = previousByKey[key];
+    if (previousRow) {
+      const oldConfidence = previousRow[confidenceCol - 1];
+      const newConfidence = row[confidenceCol - 1];
+      // 転記条件: 見込確度が変更前後で変化した案件のみを対象にする。
+      if (!historyValuesEqual_(oldConfidence, newConfidence)) {
+        // newRowsはreportLastRow+1行目から順に書き込まれているため、行番号を逆算できる。
+        const reportRow = reportLastRow + 1 + index;
+        const reportRowLink = '#gid=' + reportSheetId + '&range=A' + reportRow;
+        changes.push(
+          buildStatusHistoryChange_(headerMap, key, row, oldConfidence, newConfidence, timestamp, reportRowLink)
+        );
+      }
+    }
+
+    // 初登場の案件は比較対象がないため対象外。以降の比較のために直前状態を更新する。
+    previousByKey[key] = row;
+  });
+
+  if (changes.length === 0) return;
+
+  appendStatusHistoryRows_(changes);
+}
+
+/**
+ * 1件の見込確度変更を、「週次ステータス変更履歴」シートの列名をキーとしたオブジェクトに組み立てる。
+ * 昇降フラグ(↑/↓)はH列・I列(変更前後の見込確度)を比較するスプレッドシート側の数式で
+ * 算出される列のため、ここでは値をセットしない(applyRankFlagFormula_で数式をコピーする)。
+ * reportRowLinkは案件名セルに張るリンク(「週次報告記録」の該当行への内部リンク)のURLで、
+ * applyProjectNameLinks_でリッチテキストとして反映される(この関数自体はセル値を書かない)。
+ */
+function buildStatusHistoryChange_(headerMap, projectName, newRow, oldConfidence, newConfidence, timestamp, reportRowLink) {
+  const src = CONFIG.STATUS_HISTORY_FIELD_SOURCE_COLUMNS;
+
+  const change = {};
+  change['記録日時'] = timestamp;
+  change['担当'] = readTrackedField_(headerMap, newRow, src['担当']);
+  change['案件名'] = projectName;
+  change['__案件名リンクURL'] = reportRowLink;
+  change['カテゴリ'] = readTrackedField_(headerMap, newRow, src['カテゴリ']);
+  change['次回アクション予定日時'] = readTrackedField_(headerMap, newRow, src['次回アクション予定日時']);
+  change['ネクストアクション'] = readTrackedField_(headerMap, newRow, src['ネクストアクション']);
+  change['変更前見込確度'] = oldConfidence;
+  change['変更後見込確度'] = newConfidence;
+  change['変更経緯'] =
+    '見込確度変更: ' + formatHistoryValue_(oldConfidence) + ' → ' + formatHistoryValue_(newConfidence);
+  change['最新見積格納日'] = readTrackedField_(headerMap, newRow, src['最新見積格納日']);
+  change['契約見込月'] = readTrackedField_(headerMap, newRow, src['契約見込月']);
+  change['税込想定売上'] = readTrackedField_(headerMap, newRow, src['税込想定売上']);
+  return change;
+}
+
+/**
+ * 「週次報告記録」側の候補列名リストから最初に見つかった列の値を読み取る。
+ * どれも見つからない場合は空文字を返す。
+ */
+function readTrackedField_(headerMap, row, candidateNames) {
+  const col = findHeaderColumnIndex_(headerMap, candidateNames || []);
+  return col ? row[col - 1] : '';
+}
+
+/**
+ * headerMapの中から、候補列名リストの先頭から見て最初に存在する列番号を返す。
+ * 1つも見つからない場合はnullを返す。
+ */
+function findHeaderColumnIndex_(headerMap, candidateNames) {
+  for (let i = 0; i < candidateNames.length; i++) {
+    if (headerMap[candidateNames[i]]) return headerMap[candidateNames[i]];
+  }
+  return null;
+}
+
+/**
+ * 履歴の変更判定用に2つのセル値を比較する。null/undefined/空文字は同一視し、
+ * それ以外は文字列化してトリムした上で比較する(数値と数値文字列などの揺れを吸収)。
+ */
+function historyValuesEqual_(a, b) {
+  return normalizeHistoryValue_(a) === normalizeHistoryValue_(b);
+}
+
+function normalizeHistoryValue_(value) {
+  if (value === null || value === undefined) return '';
+  if (value instanceof Date) return String(value.getTime());
+  return String(value).trim();
+}
+
+/**
+ * 履歴の表示用に値を整形する。空欄は「(空欄)」と表示する。
+ */
+function formatHistoryValue_(value) {
+  const normalized = value === null || value === undefined ? '' : String(value).trim();
+  return normalized === '' ? '(空欄)' : normalized;
+}
+
+/**
+ * 見込確度が変化した案件を「週次ステータス変更履歴」シートの末尾に追記する。
+ * 列はCONFIG.STATUS_HISTORY_COLUMNSの名前でマッチングするため、シート側の列順が
+ * 変わっていても正しい列に入り、シートが空の場合はこの並びでヘッダーを新規作成する。
+ */
+function appendStatusHistoryRows_(changes) {
+  const historySheet = getOrCreateStatusHistorySheet_();
+  const historyColumns = CONFIG.STATUS_HISTORY_COLUMNS;
+  const historyHeaderMap = ensureColumnsExist_(historySheet, historyColumns, historyColumns);
+  const historyTotalCols = historySheet.getLastColumn();
+
+  const historyRows = changes.map(function (change) {
+    const outRow = new Array(historyTotalCols).fill('');
+    historyColumns.forEach(function (colName) {
+      const col = historyHeaderMap[colName];
+      if (col && change[colName] !== undefined) {
+        outRow[col - 1] = change[colName];
+      }
+    });
+    return outRow;
+  });
+
+  const historyLastRow = historySheet.getLastRow();
+  const historyAppendRange = historySheet.getRange(historyLastRow + 1, 1, historyRows.length, historyTotalCols);
+  writeValuesIgnoringValidation_(historyAppendRange, historyRows);
+
+  applyRankFlagFormula_(historySheet, historyHeaderMap, historyLastRow, historyRows.length);
+  applyProjectNameLinks_(historySheet, historyHeaderMap, historyLastRow, changes);
+}
+
+/**
+ * 案件名列に、既存シートの見た目(リンク青色 + 下線)に合わせたリッチテキストを設定する。
+ * リンク先はchange['__案件名リンクURL']に組み立て済みの「週次報告記録」該当行への
+ * 内部リンクで、リンクが無い場合(reportSheetの行が特定できなかった場合)でも
+ * 色・下線のスタイルだけは既存の見た目に合わせて適用する。
+ */
+function applyProjectNameLinks_(historySheet, headerMap, templateRow, changes) {
+  const nameCol = headerMap['案件名'];
+  if (!nameCol) return;
+
+  const richTextValues = changes.map(function (change) {
+    return [buildProjectNameRichText_(change['案件名'], change['__案件名リンクURL'])];
+  });
+
+  const destinationRange = historySheet.getRange(templateRow + 1, nameCol, changes.length, 1);
+  destinationRange.setRichTextValues(richTextValues);
+}
+
+/**
+ * 案件名セル用のリッチテキストを組み立てる。既存シートの案件名リンクと同じ見た目
+ * (フォントカラー: CONFIG.STATUS_HISTORY_LINK_COLOR、下線あり)にし、linkUrlが
+ * 渡された場合はそのURLへのリンクとしてセットする。
+ */
+function buildProjectNameRichText_(projectName, linkUrl) {
+  const style = SpreadsheetApp.newTextStyle()
+    .setForegroundColor(CONFIG.STATUS_HISTORY_LINK_COLOR)
+    .setUnderline(true)
+    .build();
+  const builder = SpreadsheetApp.newRichTextValue().setText(String(projectName)).setTextStyle(style);
+  if (linkUrl) {
+    builder.setLinkUrl(linkUrl);
+  }
+  return builder.build();
+}
+
+/**
+ * 昇降フラグ列(H列の変更前見込確度・I列の変更後見込確度を比較する数式が入る列)に、
+ * 直前の行(templateRow)の数式をコピーして新規追記行へ適用する。
+ * GAS側では↑/↓の値を直接書き込まず、既存の数式をそのまま踏襲する方針とする
+ * (数式の中身はスプレッドシート側の既存実装に委ね、GASは複製するだけに留める)。
+ * コピー元となる既存行が無い、またはその行に数式が入っていない場合は何もしない。
+ */
+function applyRankFlagFormula_(historySheet, headerMap, templateRow, newRowCount) {
+  const flagCol = headerMap[CONFIG.STATUS_HISTORY_RANK_FLAG_COLUMN];
+  if (!flagCol) return;
+
+  if (templateRow < 2) {
+    Logger.log(
+      '週次ステータス変更履歴: 「' + CONFIG.STATUS_HISTORY_RANK_FLAG_COLUMN +
+        '」列の数式コピー元となる既存行が無いため、数式の設定をスキップしました。' +
+        '(いずれか1行に手動で数式を設定しておけば、以降の追記時に自動でコピーされます)'
+    );
+    return;
+  }
+
+  const sourceCell = historySheet.getRange(templateRow, flagCol);
+  if (!sourceCell.getFormula()) {
+    Logger.log(
+      '週次ステータス変更履歴: コピー元セル(' + templateRow + '行目「' + CONFIG.STATUS_HISTORY_RANK_FLAG_COLUMN +
+        '」列)に数式が設定されていないため、数式の設定をスキップしました。'
+    );
+    return;
+  }
+
+  const destinationRange = historySheet.getRange(templateRow + 1, flagCol, newRowCount, 1);
+  sourceCell.copyTo(destinationRange, SpreadsheetApp.CopyPasteType.PASTE_FORMULA, false);
+}
+
+/**
+ * 「週次ステータス変更履歴」シートを取得する。存在しなければ新規作成する。
+ */
+function getOrCreateStatusHistorySheet_() {
+  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  let sheet = ss.getSheetByName(CONFIG.STATUS_HISTORY_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(CONFIG.STATUS_HISTORY_SHEET_NAME);
+  }
+  return sheet;
 }
 
 /**
@@ -150,16 +407,16 @@ function writeValuesIgnoringValidation_(range, values) {
 
 /**
  * 対象シートのヘッダー行(1行目)に、渡された列名のうち未登録のものを追加する。
- * ヘッダーが空の場合は「取込日時」「元ファイル名」から作成する。
+ * ヘッダーが空の場合はdefaultHeader(省略時は「取込日時」「元ファイル名」)から作成する。
  * 戻り値: { 列名: 列番号(1始まり) } のマップ
  */
-function ensureColumnsExist_(targetSheet, headerNames) {
+function ensureColumnsExist_(targetSheet, headerNames, defaultHeader) {
   const lastCol = targetSheet.getLastColumn();
   let headerRow = lastCol > 0 ? targetSheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
   let existing = headerRow.map(function (h) { return String(h).trim(); }).filter(function (h) { return h !== ''; });
 
   if (existing.length === 0) {
-    existing = ['取込日時', '元ファイル名'];
+    existing = (defaultHeader || ['取込日時', '元ファイル名']).slice();
   }
 
   let changed = existing.length !== headerRow.length;
