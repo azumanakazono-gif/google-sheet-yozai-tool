@@ -55,6 +55,14 @@ const CONFIG = {
     '税込想定売上': ['税込想定売上']
   },
 
+  // 「今月」等の予材シートでO列(見込確度)が手動編集された際に、変更理由の入力ダイアログを
+  // 表示して「週次ステータス変更履歴」に記録する機能(onConfidenceCellEdited)で使う設定。
+  // 対象とする予材シート名(複数可)。実際の運用シート名に合わせて追加・変更すること。
+  CONFIDENCE_EDIT_SHEET_NAMES: ['今月'],
+  // 見込確度列をヘッダー名(STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES)で見つけられない
+  // 場合に使うフォールバックの列(既定 O列)。
+  CONFIDENCE_EDIT_COLUMN_LETTER_FALLBACK: 'O',
+
   // 取り込み元ファイルの1行目がヘッダー行かどうか
   SOURCE_HAS_HEADER: true,
 

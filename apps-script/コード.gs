@@ -72,6 +72,14 @@ const CONFIG = {
     '税込想定売上': ['税込想定売上']
   },
 
+  // 「今月」等の予材シートでO列(見込確度)が手動編集された際に、変更理由の入力ダイアログを
+  // 表示して「週次ステータス変更履歴」に記録する機能(onConfidenceCellEdited)で使う設定。
+  // 対象とする予材シート名(複数可)。実際の運用シート名に合わせて追加・変更すること。
+  CONFIDENCE_EDIT_SHEET_NAMES: ['今月'],
+  // 見込確度列をヘッダー名(STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES)で見つけられない
+  // 場合に使うフォールバックの列(既定 O列)。
+  CONFIDENCE_EDIT_COLUMN_LETTER_FALLBACK: 'O',
+
   // 取り込み元ファイルの1行目がヘッダー行かどうか
   SOURCE_HAS_HEADER: true,
 
@@ -288,10 +296,12 @@ function updateWeeklyStatusHistory_(reportSheet, reportLastRow, headerMap, previ
  * 1件の見込確度変更を、「週次ステータス変更履歴」シートの列名をキーとしたオブジェクトに組み立てる。
  * 昇降フラグ(↑/↓)はH列・I列(変更前後の見込確度)を比較するスプレッドシート側の数式で
  * 算出される列のため、ここでは値をセットしない(applyRankFlagFormula_で数式をコピーする)。
- * reportRowLinkは案件名セルに張るリンク(「週次報告記録」の該当行への内部リンク)のURLで、
+ * reportRowLinkは案件名セルに張るリンク(該当行への内部リンク)のURLで、
  * applyProjectNameLinks_でリッチテキストとして反映される(この関数自体はセル値を書かない)。
+ * reasonText(省略可)は手動編集時の変更理由(onConfidenceCellEdited参照)で、指定があれば
+ * 「変更経緯」に併記する。
  */
-function buildStatusHistoryChange_(headerMap, projectName, newRow, oldConfidence, newConfidence, timestamp, reportRowLink) {
+function buildStatusHistoryChange_(headerMap, projectName, newRow, oldConfidence, newConfidence, timestamp, reportRowLink, reasonText) {
   const src = CONFIG.STATUS_HISTORY_FIELD_SOURCE_COLUMNS;
 
   const change = {};
@@ -305,7 +315,8 @@ function buildStatusHistoryChange_(headerMap, projectName, newRow, oldConfidence
   change['変更前見込確度'] = oldConfidence;
   change['変更後見込確度'] = newConfidence;
   change['変更経緯'] =
-    '見込確度変更: ' + formatHistoryValue_(oldConfidence) + ' → ' + formatHistoryValue_(newConfidence);
+    '見込確度変更: ' + formatHistoryValue_(oldConfidence) + ' → ' + formatHistoryValue_(newConfidence) +
+    (reasonText ? '(理由: ' + reasonText + ')' : '');
   change['最新見積格納日'] = readTrackedField_(headerMap, newRow, src['最新見積格納日']);
   change['契約見込月'] = readTrackedField_(headerMap, newRow, src['契約見込月']);
   change['税込想定売上'] = readTrackedField_(headerMap, newRow, src['税込想定売上']);
@@ -462,6 +473,107 @@ function getOrCreateStatusHistorySheet_() {
     sheet = ss.insertSheet(CONFIG.STATUS_HISTORY_SHEET_NAME);
   }
   return sheet;
+}
+
+/**
+ * 「今月」等の予材シート(CONFIG.CONFIDENCE_EDIT_SHEET_NAMES)で見込確度列が手動編集された際に、
+ * ポップアップ(Ui.prompt)で変更理由を入力させ、「週次ステータス変更履歴」へ記録する。
+ *
+ * 【重要】単純トリガーのonEdit(e)はダイアログ(Ui.prompt/Browser.inputBox)を表示できないため、
+ * この関数は installConfidenceChangeTrigger() で作成するインストーラブルトリガーとして
+ * 登録すること(GASエディタで直接「onEdit」という名前の関数を作っても、この制限により
+ * ダイアログの部分は動作しない)。
+ *
+ * - 対象は「見込確度」列(ヘッダー名で検出。見つからない場合はCONFIG.CONFIDENCE_EDIT_COLUMN_LETTER_FALLBACK
+ *   =既定でO列)の単一セル編集のみ。複数セルへの一括貼り付けは、編集前の値(oldValue)を
+ *   個別に取得できないため対象外とする。
+ * - 変更理由の入力がキャンセル/空欄でも、変更自体は理由なしで記録する(セルの値は
+ *   ユーザーの編集内容のまま変更しない)。
+ * - 記録に失敗しても例外は投げず、ログとアラートに留める(セルの編集自体は既に確定しているため)。
+ */
+function onConfidenceCellEdited(e) {
+  if (!e || !e.range) return;
+
+  const sheet = e.range.getSheet();
+  if (CONFIG.CONFIDENCE_EDIT_SHEET_NAMES.indexOf(sheet.getName()) === -1) return;
+
+  // ペースト等の複数セル編集はoldValueを個別に取得できないため対象外。
+  if (e.range.getNumRows() !== 1 || e.range.getNumColumns() !== 1) return;
+
+  const editedRow = e.range.getRow();
+  if (editedRow === 1) return; // ヘッダー行自体の編集は対象外
+
+  const lastCol = sheet.getLastColumn();
+  if (lastCol === 0) return;
+  const headerMap = buildHeaderMap_(sheet.getRange(1, 1, 1, lastCol).getValues()[0]);
+
+  const confidenceCol = findHeaderColumnIndex_(headerMap, CONFIG.STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES) ||
+    columnLetterToIndex_(CONFIG.CONFIDENCE_EDIT_COLUMN_LETTER_FALLBACK);
+
+  if (e.range.getColumn() !== confidenceCol) return;
+
+  const oldConfidence = e.oldValue !== undefined ? e.oldValue : '';
+  const newConfidence = e.value !== undefined ? e.value : sheet.getRange(editedRow, confidenceCol).getValue();
+  if (historyValuesEqual_(oldConfidence, newConfidence)) return;
+
+  try {
+    const keyCol = findHeaderColumnIndex_(headerMap, CONFIG.STATUS_HISTORY_KEY_COLUMN_CANDIDATES);
+    const rowValues = sheet.getRange(editedRow, 1, 1, lastCol).getValues()[0];
+    const projectName = keyCol ? String(rowValues[keyCol - 1]).trim() : '';
+    const displayName = projectName || ('(' + sheet.getName() + ' ' + editedRow + '行目)');
+
+    const reason = promptForChangeReason_(displayName, oldConfidence, newConfidence);
+    const reportRowLink = '#gid=' + sheet.getSheetId() + '&range=A' + editedRow;
+
+    const change = buildStatusHistoryChange_(
+      headerMap, displayName, rowValues, oldConfidence, newConfidence, new Date(), reportRowLink, reason
+    );
+    appendStatusHistoryRows_([change]);
+  } catch (err) {
+    Logger.log(
+      '週次ステータス変更履歴(手動編集分)の記録に失敗しました: ' +
+        sheet.getName() + '!' + e.range.getA1Notation() + ' / ' + err
+    );
+    try {
+      SpreadsheetApp.getUi().alert('見込確度の変更履歴の記録に失敗しました。管理者に連絡してください。\n' + err);
+    } catch (uiErr) {
+      // アラート表示自体に失敗しても、記録失敗の実害はログに残っているため無視する。
+    }
+  }
+}
+
+/**
+ * 見込確度の変更理由をUi.promptで入力させる。キャンセル/未入力の場合、またはダイアログを
+ * 表示できない場合は空文字を返す(変更自体の記録は妨げない)。
+ */
+function promptForChangeReason_(projectName, oldConfidence, newConfidence) {
+  try {
+    const ui = SpreadsheetApp.getUi();
+    const response = ui.prompt(
+      '見込確度の変更理由を入力してください',
+      '案件: ' + projectName + '\n見込確度: ' +
+        formatHistoryValue_(oldConfidence) + ' → ' + formatHistoryValue_(newConfidence),
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (response.getSelectedButton() !== ui.Button.OK) return '';
+    return response.getResponseText().trim();
+  } catch (err) {
+    Logger.log('変更理由の入力ダイアログを表示できませんでした(理由は空欄で記録します): ' + err);
+    return '';
+  }
+}
+
+/**
+ * ヘッダー行(文字列配列)から { 列名: 列番号(1始まり) } のマップを作る。
+ * ensureColumnsExist_と異なり、シートへの書き込みは行わない読み取り専用版。
+ */
+function buildHeaderMap_(headerRow) {
+  const map = {};
+  headerRow.forEach(function (name, idx) {
+    const trimmed = String(name).trim();
+    if (trimmed !== '') map[trimmed] = idx + 1;
+  });
+  return map;
 }
 
 /**
@@ -1050,6 +1162,28 @@ function installWeeklyTrigger() {
     .timeBased()
     .onWeekDay(ScriptApp.WeekDay.MONDAY)
     .atHour(6)
+    .create();
+}
+
+/**
+ * 「今月」等の予材シートで見込確度が手動編集された際に、変更理由の入力ダイアログ
+ * (onConfidenceCellEdited)を実行するインストーラブルトリガーを設定する。一度だけ実行する。
+ * (GASエディタの「トリガー」画面から手動設定する場合はこの関数は不要。ただしその場合も
+ * 必ず「インストーラブル トリガー」として、イベントの種類を「編集時」で設定すること。
+ * 単純トリガーのonEdit(e)ではダイアログが表示できないため、この機能には使えない。)
+ * 既存の onConfidenceCellEdited 用トリガーがあれば一旦削除してから作り直す。
+ */
+function installConfidenceChangeTrigger() {
+  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  ScriptApp.getProjectTriggers().forEach(function (trigger) {
+    if (trigger.getHandlerFunction() === 'onConfidenceCellEdited') {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+
+  ScriptApp.newTrigger('onConfidenceCellEdited')
+    .forSpreadsheet(ss)
+    .onEdit()
     .create();
 }
 
