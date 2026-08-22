@@ -52,7 +52,7 @@ const CONFIG = {
     '記録日時', '担当', '案件名', 'カテゴリ',
     '次回アクション予定日時', 'ネクストアクション', '昇降フラグ',
     '変更前見込確度', '変更後見込確度', '変更経緯',
-    '最新見積格納日', '契約見込月', '税込想定売上'
+    '最新見積格納日', '契約見込月', '税込想定売上', '貢献利益率'
   ],
   // 昇降フラグ列の名前。数式で↑/↓が算出される列のため、GASは値を書き込まず、
   // 既存行の数式をコピーして新規行に適用するためだけに使う。
@@ -76,7 +76,8 @@ const CONFIG = {
     'ネクストアクション': ['ネクストアクション'],
     '最新見積格納日': ['最新見積格納日'],
     '契約見込月': ['契約見込月'],
-    '税込想定売上': ['税込想定売上']
+    '税込想定売上': ['税込想定売上'],
+    '貢献利益率': ['貢献利益率']
   },
 
   // 「今月」等の予材シートでO列(見込確度)が手動編集された際に、変更理由の入力ダイアログを
@@ -95,7 +96,8 @@ const CONFIG = {
     '見込確度': 'O',
     '最新見積格納日': 'J',
     '契約見込月': 'R',
-    '税込想定売上': 'K'
+    '税込想定売上': 'K',
+    '貢献利益率': 'L'
   },
 
   // 取り込み元ファイルの1行目がヘッダー行かどうか
@@ -342,6 +344,7 @@ function buildStatusHistoryChange_(fields, projectName, oldConfidence, newConfid
   change['最新見積格納日'] = fields['最新見積格納日'] || '';
   change['契約見込月'] = fields['契約見込月'] || '';
   change['税込想定売上'] = fields['税込想定売上'] || '';
+  change['貢献利益率'] = fields['貢献利益率'] || '';
   return change;
 }
 
@@ -613,7 +616,8 @@ function onConfidenceCellEdited(e) {
       'ネクストアクション': readConfidenceEditField_(rowValues, 'ネクストアクション'),
       '最新見積格納日': readConfidenceEditField_(rowValues, '最新見積格納日'),
       '契約見込月': readConfidenceEditField_(rowValues, '契約見込月'),
-      '税込想定売上': readConfidenceEditField_(rowValues, '税込想定売上')
+      '税込想定売上': readConfidenceEditField_(rowValues, '税込想定売上'),
+      '貢献利益率': readConfidenceEditField_(rowValues, '貢献利益率')
     };
 
     const change = buildStatusHistoryChange_(

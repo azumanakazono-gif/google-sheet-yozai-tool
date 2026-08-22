@@ -240,6 +240,7 @@ function buildStatusHistoryChange_(fields, projectName, oldConfidence, newConfid
   change['最新見積格納日'] = fields['最新見積格納日'] || '';
   change['契約見込月'] = fields['契約見込月'] || '';
   change['税込想定売上'] = fields['税込想定売上'] || '';
+  change['貢献利益率'] = fields['貢献利益率'] || '';
   return change;
 }
 
@@ -511,7 +512,8 @@ function onConfidenceCellEdited(e) {
       'ネクストアクション': readConfidenceEditField_(rowValues, 'ネクストアクション'),
       '最新見積格納日': readConfidenceEditField_(rowValues, '最新見積格納日'),
       '契約見込月': readConfidenceEditField_(rowValues, '契約見込月'),
-      '税込想定売上': readConfidenceEditField_(rowValues, '税込想定売上')
+      '税込想定売上': readConfidenceEditField_(rowValues, '税込想定売上'),
+      '貢献利益率': readConfidenceEditField_(rowValues, '貢献利益率')
     };
 
     const change = buildStatusHistoryChange_(
