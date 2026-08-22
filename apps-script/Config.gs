@@ -21,6 +21,10 @@ const CONFIG = {
   // 履歴シートの実際のレイアウト: 1行目=タイトル行、2行目=列見出し行、3行目以降=データ行。
   // ヘッダー(列見出し)が入っている行番号。ensureColumnsExist_・追記位置の判定の両方で使う。
   STATUS_HISTORY_HEADER_ROW: 2,
+  // 「記録日時」列(A列)に書き込む日時文字列のフォーマット(Utilities.formatDate準拠)。
+  // 日付だけでなく時刻まで含めて記録するため、Dateオブジェクトのままではなく
+  // この書式の文字列に変換してから書き込む(buildStatusHistoryChange_を参照)。
+  STATUS_HISTORY_TIMESTAMP_FORMAT: 'yyyy/MM/dd HH:mm:ss',
   // 履歴シートの列構成(既存シートの列順・列名に合わせてある)。
   // シートが空の場合はこの並びでヘッダーを新規作成し、既にヘッダーがある場合は
   // 名前が一致する列にだけ書き込む(他の既存列には影響しない)。
