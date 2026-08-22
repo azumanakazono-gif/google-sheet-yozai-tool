@@ -79,9 +79,20 @@ const CONFIG = {
   // 表示して「週次ステータス変更履歴」に記録する機能(onConfidenceCellEdited)で使う設定。
   // 対象とする予材シート名(複数可)。実際の運用シート名に合わせて追加・変更すること。
   CONFIDENCE_EDIT_SHEET_NAMES: ['今月'],
-  // 見込確度列をヘッダー名(STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES)で見つけられない
-  // 場合に使うフォールバックの列(既定 O列)。
-  CONFIDENCE_EDIT_COLUMN_LETTER_FALLBACK: 'O',
+  // 「今月」シートは列見出しが「週次報告記録」側と一致しない(または見出し行の構成が異なる)ため、
+  // ヘッダー名でのマッチングは行わず、ここに設定した固定の列位置から直接値を抽出する。
+  // 実際の「今月」シートの列位置に合わせて調整すること。
+  CONFIDENCE_EDIT_COLUMN_LETTERS: {
+    '案件名': 'C',
+    '担当': 'D',
+    'カテゴリ': 'E',
+    '次回アクション予定日時': 'K',
+    'ネクストアクション': 'L',
+    '見込確度': 'O',
+    '最新見積格納日': 'R',
+    '契約見込月': 'S',
+    '税込想定売上': 'AC'
+  },
 
   // 取り込み元ファイルの1行目がヘッダー行かどうか
   SOURCE_HAS_HEADER: true,
@@ -282,8 +293,12 @@ function updateWeeklyStatusHistory_(reportSheet, reportLastRow, headerMap, previ
         // newRowsはreportLastRow+1行目から順に書き込まれているため、行番号を逆算できる。
         const reportRow = reportLastRow + 1 + index;
         const reportRowLink = '#gid=' + reportSheetId + '&range=A' + reportRow;
+        const fields = {};
+        Object.keys(CONFIG.STATUS_HISTORY_FIELD_SOURCE_COLUMNS).forEach(function (name) {
+          fields[name] = readTrackedField_(headerMap, row, CONFIG.STATUS_HISTORY_FIELD_SOURCE_COLUMNS[name]);
+        });
         changes.push(
-          buildStatusHistoryChange_(headerMap, key, row, oldConfidence, newConfidence, timestamp, reportRowLink)
+          buildStatusHistoryChange_(fields, key, oldConfidence, newConfidence, timestamp, reportRowLink)
         );
       }
     }
@@ -299,6 +314,8 @@ function updateWeeklyStatusHistory_(reportSheet, reportLastRow, headerMap, previ
 
 /**
  * 1件の見込確度変更を、「週次ステータス変更履歴」シートの列名をキーとしたオブジェクトに組み立てる。
+ * fieldsは呼び出し元(週次同期側はヘッダー名マッチング、手動編集側は固定列位置)で既に
+ * 解決済みの値を{ '担当': ..., 'カテゴリ': ..., ... }の形で渡す(値の取得元を問わない)。
  * 昇降フラグ(↑/↓)はH列・I列(変更前後の見込確度)を比較するスプレッドシート側の数式で
  * 算出される列のため、ここでは値をセットしない(applyRankFlagFormula_で数式をコピーする)。
  * reportRowLinkは案件名セルに張るリンク(該当行への内部リンク)のURLで、
@@ -306,25 +323,23 @@ function updateWeeklyStatusHistory_(reportSheet, reportLastRow, headerMap, previ
  * reasonText(省略可)は手動編集時の変更理由(onConfidenceCellEdited参照)で、指定があれば
  * 「変更経緯」に併記する。
  */
-function buildStatusHistoryChange_(headerMap, projectName, newRow, oldConfidence, newConfidence, timestamp, reportRowLink, reasonText) {
-  const src = CONFIG.STATUS_HISTORY_FIELD_SOURCE_COLUMNS;
-
+function buildStatusHistoryChange_(fields, projectName, oldConfidence, newConfidence, timestamp, reportRowLink, reasonText) {
   const change = {};
   change['記録日時'] = timestamp;
-  change['担当'] = readTrackedField_(headerMap, newRow, src['担当']);
+  change['担当'] = fields['担当'] || '';
   change['案件名'] = projectName;
   change['__案件名リンクURL'] = reportRowLink;
-  change['カテゴリ'] = readTrackedField_(headerMap, newRow, src['カテゴリ']);
-  change['次回アクション予定日時'] = readTrackedField_(headerMap, newRow, src['次回アクション予定日時']);
-  change['ネクストアクション'] = readTrackedField_(headerMap, newRow, src['ネクストアクション']);
+  change['カテゴリ'] = fields['カテゴリ'] || '';
+  change['次回アクション予定日時'] = fields['次回アクション予定日時'] || '';
+  change['ネクストアクション'] = fields['ネクストアクション'] || '';
   change['変更前見込確度'] = oldConfidence;
   change['変更後見込確度'] = newConfidence;
   change['変更経緯'] =
     '見込確度変更: ' + formatHistoryValue_(oldConfidence) + ' → ' + formatHistoryValue_(newConfidence) +
     (reasonText ? '(理由: ' + reasonText + ')' : '');
-  change['最新見積格納日'] = readTrackedField_(headerMap, newRow, src['最新見積格納日']);
-  change['契約見込月'] = readTrackedField_(headerMap, newRow, src['契約見込月']);
-  change['税込想定売上'] = readTrackedField_(headerMap, newRow, src['税込想定売上']);
+  change['最新見積格納日'] = fields['最新見積格納日'] || '';
+  change['契約見込月'] = fields['契約見込月'] || '';
+  change['税込想定売上'] = fields['税込想定売上'] || '';
   return change;
 }
 
@@ -519,9 +534,12 @@ function getOrCreateStatusHistorySheet_() {
  * 登録すること(GASエディタで直接「onEdit」という名前の関数を作っても、この制限により
  * ダイアログの部分は動作しない)。
  *
- * - 対象は「見込確度」列(ヘッダー名で検出。見つからない場合はCONFIG.CONFIDENCE_EDIT_COLUMN_LETTER_FALLBACK
- *   =既定でO列)の単一セル編集のみ。複数セルへの一括貼り付けは、編集前の値(oldValue)を
- *   個別に取得できないため対象外とする。
+ * - 「今月」シートは列見出しが「週次報告記録」側と一致しない(または見出し行の構成が異なる)ため、
+ *   ヘッダー名でのマッチングは行わず、CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERSに設定した
+ *   固定の列位置から直接値を抽出する(readConfidenceEditField_参照)。
+ * - 対象は「見込確度」列(CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERS['見込確度']、既定でO列)の
+ *   単一セル編集のみ。複数セルへの一括貼り付けは、編集前の値(oldValue)を個別に取得できない
+ *   ため対象外とする。
  * - 変更理由の入力がキャンセル/空欄でも、変更自体は理由なしで記録する(セルの値は
  *   ユーザーの編集内容のまま変更しない)。
  * - 記録に失敗しても例外は投げず、ログとアラートに留める(セルの編集自体は既に確定しているため)。
@@ -538,32 +556,42 @@ function onConfidenceCellEdited(e) {
   const editedRow = e.range.getRow();
   if (editedRow === 1) return; // ヘッダー行自体の編集は対象外
 
-  const lastCol = sheet.getLastColumn();
-  if (lastCol === 0) return;
-  const headerMap = buildHeaderMap_(sheet.getRange(1, 1, 1, lastCol).getValues()[0]);
-
-  const confidenceCol = findHeaderColumnIndex_(headerMap, CONFIG.STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES) ||
-    columnLetterToIndex_(CONFIG.CONFIDENCE_EDIT_COLUMN_LETTER_FALLBACK);
-
+  const confidenceCol = columnLetterToIndex_(CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERS['見込確度']);
   if (e.range.getColumn() !== confidenceCol) return;
 
+  const lastCol = sheet.getLastColumn();
+  if (lastCol === 0) return;
+  // 編集された行の現在値(編集確定後の状態)をまとめて取得し、以降はここから固定列位置で
+  // 直接読み取る(ヘッダー名マッチングには依存しない)。
+  const rowValues = sheet.getRange(editedRow, 1, 1, lastCol).getValues()[0];
+
   const oldConfidence = e.oldValue !== undefined ? e.oldValue : '';
-  const newConfidence = e.value !== undefined ? e.value : sheet.getRange(editedRow, confidenceCol).getValue();
+  // 変更後の値はe.valueではなく、確定後の状態を反映するrowValues(上で取得済み)から読む方が
+  // 確実(貼り付け以外の一部の編集種別ではe.valueが入らないことがあるため)。
+  const newConfidence = readConfidenceEditField_(rowValues, '見込確度');
   // 変更前見込確度が空欄(=新規登録による初回設定)の場合は「確度の変更」ではないため対象外とする。
   if (normalizeHistoryValue_(oldConfidence) === '') return;
   if (historyValuesEqual_(oldConfidence, newConfidence)) return;
 
   try {
-    const keyCol = findHeaderColumnIndex_(headerMap, CONFIG.STATUS_HISTORY_KEY_COLUMN_CANDIDATES);
-    const rowValues = sheet.getRange(editedRow, 1, 1, lastCol).getValues()[0];
-    const projectName = keyCol ? String(rowValues[keyCol - 1]).trim() : '';
+    const projectName = String(readConfidenceEditField_(rowValues, '案件名')).trim();
     const displayName = projectName || ('(' + sheet.getName() + ' ' + editedRow + '行目)');
 
     const reason = promptForChangeReason_(displayName, oldConfidence, newConfidence);
     const reportRowLink = '#gid=' + sheet.getSheetId() + '&range=A' + editedRow;
 
+    const fields = {
+      '担当': readConfidenceEditField_(rowValues, '担当'),
+      'カテゴリ': readConfidenceEditField_(rowValues, 'カテゴリ'),
+      '次回アクション予定日時': readConfidenceEditField_(rowValues, '次回アクション予定日時'),
+      'ネクストアクション': readConfidenceEditField_(rowValues, 'ネクストアクション'),
+      '最新見積格納日': readConfidenceEditField_(rowValues, '最新見積格納日'),
+      '契約見込月': readConfidenceEditField_(rowValues, '契約見込月'),
+      '税込想定売上': readConfidenceEditField_(rowValues, '税込想定売上')
+    };
+
     const change = buildStatusHistoryChange_(
-      headerMap, displayName, rowValues, oldConfidence, newConfidence, new Date(), reportRowLink, reason
+      fields, displayName, oldConfidence, newConfidence, new Date(), reportRowLink, reason
     );
     appendStatusHistoryRows_([change]);
   } catch (err) {
@@ -601,16 +629,15 @@ function promptForChangeReason_(projectName, oldConfidence, newConfidence) {
 }
 
 /**
- * ヘッダー行(文字列配列)から { 列名: 列番号(1始まり) } のマップを作る。
- * ensureColumnsExist_と異なり、シートへの書き込みは行わない読み取り専用版。
+ * 「今月」シートの1行分の値(rowValues、A列起点の配列)から、CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERS
+ * に設定された固定列位置を使ってfieldNameに対応する値を読み取る。列位置の設定が無い場合や、
+ * rowValuesの範囲外(シートの右端より右を指している)の場合は空文字を返す。
  */
-function buildHeaderMap_(headerRow) {
-  const map = {};
-  headerRow.forEach(function (name, idx) {
-    const trimmed = String(name).trim();
-    if (trimmed !== '') map[trimmed] = idx + 1;
-  });
-  return map;
+function readConfidenceEditField_(rowValues, fieldName) {
+  const letter = CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERS[fieldName];
+  if (!letter) return '';
+  const col = columnLetterToIndex_(letter);
+  return col <= rowValues.length ? rowValues[col - 1] : '';
 }
 
 /**
