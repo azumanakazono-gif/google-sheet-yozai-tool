@@ -188,8 +188,10 @@ function updateWeeklyStatusHistory_(reportSheet, reportLastRow, headerMap, previ
     if (previousRow) {
       const oldConfidence = previousRow[confidenceCol - 1];
       const newConfidence = row[confidenceCol - 1];
-      // 転記条件: 見込確度が変更前後で変化した案件のみを対象にする。
-      if (!historyValuesEqual_(oldConfidence, newConfidence)) {
+      // 転記条件: 変更前見込確度が存在し(空欄の新規登録は除外)、かつ変更前後で
+      // 値が異なる(実際に確度の昇降があった)案件のみを対象にする。
+      const hasOldConfidence = normalizeHistoryValue_(oldConfidence) !== '';
+      if (hasOldConfidence && !historyValuesEqual_(oldConfidence, newConfidence)) {
         // newRowsはreportLastRow+1行目から順に書き込まれているため、行番号を逆算できる。
         const reportRow = reportLastRow + 1 + index;
         const reportRowLink = '#gid=' + reportSheetId + '&range=A' + reportRow;
@@ -289,7 +291,8 @@ function formatHistoryValue_(value) {
 function appendStatusHistoryRows_(changes) {
   const historySheet = getOrCreateStatusHistorySheet_();
   const historyColumns = CONFIG.STATUS_HISTORY_COLUMNS;
-  const historyHeaderMap = ensureColumnsExist_(historySheet, historyColumns, historyColumns);
+  const headerRowNumber = CONFIG.STATUS_HISTORY_HEADER_ROW || 1;
+  const historyHeaderMap = ensureColumnsExist_(historySheet, historyColumns, historyColumns, headerRowNumber);
   const historyTotalCols = historySheet.getLastColumn();
 
   const historyRows = changes.map(function (change) {
@@ -305,9 +308,12 @@ function appendStatusHistoryRows_(changes) {
 
   // getLastRow()はシート全体(どの列でもよい)の最終行を見るため、他の列に離れた場所まで
   // 書式やゴミデータが残っていると、実際のデータより大幅に手前/先の行を誤って返すことがある。
-  // 記録日時列(通常A列)に値が入っている最終行を明示的に探し、その次の行に追記する。
+  // また、このシートは1行目=タイトル・headerRowNumber行目=列見出しの構成のため、
+  // 記録日時列(通常A列)のうちデータ領域(見出し行の次の行以降)だけを対象に、
+  // 値が入っている最終行を明示的に探して、その次の行に追記する。
   const dateCol = historyHeaderMap[historyColumns[0]];
-  const historyLastRow = findLastRowWithValueInColumn_(historySheet, dateCol);
+  const dataStartRow = headerRowNumber + 1;
+  const historyLastRow = findLastRowWithValueInColumn_(historySheet, dateCol, dataStartRow);
   const historyAppendRange = historySheet.getRange(historyLastRow + 1, 1, historyRows.length, historyTotalCols);
   writeValuesIgnoringValidation_(historyAppendRange, historyRows);
 
@@ -316,20 +322,24 @@ function appendStatusHistoryRows_(changes) {
 }
 
 /**
- * 指定した列(col)を上から走査し、値が入っている最終行を返す。1行も無ければ0を返す。
+ * 指定した列(col)のうち、startRow行目以降(タイトル行・ヘッダー行より下のデータ領域)を
+ * 上から走査し、値が入っている最終行を返す。1行も無ければ(startRow - 1)を返す
+ * (=呼び出し側はその次の行、つまりstartRowから安全に追記できる)。
  * (Sheet.getLastRow()はシート全体のどこかに値/書式があれば影響を受けるため、
- * 特定の列に絞って「実際のデータの最終行」を求めたい場合に使う)
+ * 特定の列・特定の開始行に絞って「実際のデータの最終行」を求めたい場合に使う)
  */
-function findLastRowWithValueInColumn_(sheet, col) {
+function findLastRowWithValueInColumn_(sheet, col, startRow) {
+  const searchStartRow = startRow || 1;
   const maxRow = sheet.getLastRow();
-  if (maxRow === 0) return 0;
+  if (maxRow < searchStartRow) return searchStartRow - 1;
 
-  const values = sheet.getRange(1, col, maxRow, 1).getValues();
+  const numRows = maxRow - searchStartRow + 1;
+  const values = sheet.getRange(searchStartRow, col, numRows, 1).getValues();
   for (let i = values.length - 1; i >= 0; i--) {
     const value = values[i][0];
-    if (value !== '' && value !== null) return i + 1;
+    if (value !== '' && value !== null) return searchStartRow + i;
   }
-  return 0;
+  return searchStartRow - 1;
 }
 
 /**
@@ -378,10 +388,11 @@ function applyRankFlagFormula_(historySheet, headerMap, templateRow, newRowCount
   const flagCol = headerMap[CONFIG.STATUS_HISTORY_RANK_FLAG_COLUMN];
   if (!flagCol) return;
 
-  if (templateRow < 2) {
+  const headerRowNumber = CONFIG.STATUS_HISTORY_HEADER_ROW || 1;
+  if (templateRow <= headerRowNumber) {
     Logger.log(
       '週次ステータス変更履歴: 「' + CONFIG.STATUS_HISTORY_RANK_FLAG_COLUMN +
-        '」列の数式コピー元となる既存行が無いため、数式の設定をスキップしました。' +
+        '」列の数式コピー元となる既存データ行が無いため、数式の設定をスキップしました。' +
         '(いずれか1行に手動で数式を設定しておけば、以降の追記時に自動でコピーされます)'
     );
     return;
@@ -451,6 +462,8 @@ function onConfidenceCellEdited(e) {
 
   const oldConfidence = e.oldValue !== undefined ? e.oldValue : '';
   const newConfidence = e.value !== undefined ? e.value : sheet.getRange(editedRow, confidenceCol).getValue();
+  // 変更前見込確度が空欄(=新規登録による初回設定)の場合は「確度の変更」ではないため対象外とする。
+  if (normalizeHistoryValue_(oldConfidence) === '') return;
   if (historyValuesEqual_(oldConfidence, newConfidence)) return;
 
   try {
@@ -531,13 +544,16 @@ function writeValuesIgnoringValidation_(range, values) {
 }
 
 /**
- * 対象シートのヘッダー行(1行目)に、渡された列名のうち未登録のものを追加する。
- * ヘッダーが空の場合はdefaultHeader(省略時は「取込日時」「元ファイル名」)から作成する。
+ * 対象シートのヘッダー行(headerRowNumber省略時は1行目)に、渡された列名のうち
+ * 未登録のものを追加する。ヘッダーが空の場合はdefaultHeader(省略時は「取込日時」「元ファイル名」)
+ * から作成する。タイトル行がヘッダーより上にあるシート(例: 週次ステータス変更履歴)では
+ * headerRowNumberで実際のヘッダー行番号を指定する。
  * 戻り値: { 列名: 列番号(1始まり) } のマップ
  */
-function ensureColumnsExist_(targetSheet, headerNames, defaultHeader) {
+function ensureColumnsExist_(targetSheet, headerNames, defaultHeader, headerRowNumber) {
+  const row = headerRowNumber || 1;
   const lastCol = targetSheet.getLastColumn();
-  const headerRow = lastCol > 0 ? targetSheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
+  const headerRow = lastCol > 0 ? targetSheet.getRange(row, 1, 1, lastCol).getValues()[0] : [];
   const trimmedHeaderRow = headerRow.map(function (h) { return String(h).trim(); });
   const hasAnyHeader = trimmedHeaderRow.some(function (h) { return h !== ''; });
 
@@ -556,7 +572,7 @@ function ensureColumnsExist_(targetSheet, headerNames, defaultHeader) {
   });
 
   if (changed) {
-    targetSheet.getRange(1, 1, 1, columns.length).setValues([columns]);
+    targetSheet.getRange(row, 1, 1, columns.length).setValues([columns]);
   }
 
   const map = {};
