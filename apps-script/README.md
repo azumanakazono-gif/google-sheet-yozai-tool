@@ -1,11 +1,11 @@
 # 週次予材リスト同期スクリプト (Google Apps Script)
 
 Google Driveフォルダ内のExcel/スプレッドシートを読み取り、「31期予材リスト」スプレッドシートの
-「週次報告記録」シート末尾に自動追記するGASスクリプトです。追記と連動して、見込確度が変化した
+「報告記録」シート末尾に自動追記するGASスクリプトです。追記と連動して、見込確度が変化した
 案件だけを「週次ステータス変更履歴」シートにも自動記録します。
 
 - 取得元フォルダ: `1WrjMUtIpe2JEwChiJygRs1TeqWGgPuyc`
-- 追記先スプレッドシート: `1zTz2lLUD6M4SPBCcEO3OBxNMmv1U7RsUYRJhkKkgOOQ`（シート「週次報告記録」）
+- 追記先スプレッドシート: `1zTz2lLUD6M4SPBCcEO3OBxNMmv1U7RsUYRJhkKkgOOQ`（シート「報告記録」。`Config.gs`の`TARGET_SHEET_NAME`で変更可能）
 
 ## ファイル構成
 
