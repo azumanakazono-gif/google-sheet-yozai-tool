@@ -38,6 +38,10 @@ const CONFIG = {
   // 履歴シートの実際のレイアウト: 1行目=タイトル行、2行目=列見出し行、3行目以降=データ行。
   // ヘッダー(列見出し)が入っている行番号。ensureColumnsExist_・追記位置の判定の両方で使う。
   STATUS_HISTORY_HEADER_ROW: 2,
+  // 「記録日時」列(A列)に書き込む日時文字列のフォーマット(Utilities.formatDate準拠)。
+  // 日付だけでなく時刻まで含めて記録するため、Dateオブジェクトのままではなく
+  // この書式の文字列に変換してから書き込む(buildStatusHistoryChange_を参照)。
+  STATUS_HISTORY_TIMESTAMP_FORMAT: 'yyyy/MM/dd HH:mm:ss',
   // 履歴シートの列構成(既存シートの列順・列名に合わせてある)。
   // シートが空の場合はこの並びでヘッダーを新規作成し、既にヘッダーがある場合は
   // 名前が一致する列にだけ書き込む(他の既存列には影響しない)。
@@ -320,12 +324,12 @@ function updateWeeklyStatusHistory_(reportSheet, reportLastRow, headerMap, previ
  * 算出される列のため、ここでは値をセットしない(applyRankFlagFormula_で数式をコピーする)。
  * reportRowLinkは案件名セルに張るリンク(該当行への内部リンク)のURLで、
  * applyProjectNameLinks_でリッチテキストとして反映される(この関数自体はセル値を書かない)。
- * reasonText(省略可)は手動編集時の変更理由(onConfidenceCellEdited参照)で、指定があれば
- * 「変更経緯」に併記する。
+ * reasonText(省略可)は手動編集時の変更理由(onConfidenceCellEdited参照)で、そのまま
+ * 「変更経緯」に書き込む(自動生成の説明文は付与しない。未入力/キャンセル時・バッチ取り込み時は空文字)。
  */
 function buildStatusHistoryChange_(fields, projectName, oldConfidence, newConfidence, timestamp, reportRowLink, reasonText) {
   const change = {};
-  change['記録日時'] = timestamp;
+  change['記録日時'] = Utilities.formatDate(timestamp, CONFIG.TIME_ZONE, CONFIG.STATUS_HISTORY_TIMESTAMP_FORMAT);
   change['担当'] = fields['担当'] || '';
   change['案件名'] = projectName;
   change['__案件名リンクURL'] = reportRowLink;
@@ -334,9 +338,7 @@ function buildStatusHistoryChange_(fields, projectName, oldConfidence, newConfid
   change['ネクストアクション'] = fields['ネクストアクション'] || '';
   change['変更前見込確度'] = oldConfidence;
   change['変更後見込確度'] = newConfidence;
-  change['変更経緯'] =
-    '見込確度変更: ' + formatHistoryValue_(oldConfidence) + ' → ' + formatHistoryValue_(newConfidence) +
-    (reasonText ? '(理由: ' + reasonText + ')' : '');
+  change['変更経緯'] = reasonText || '';
   change['最新見積格納日'] = fields['最新見積格納日'] || '';
   change['契約見込月'] = fields['契約見込月'] || '';
   change['税込想定売上'] = fields['税込想定売上'] || '';
@@ -481,17 +483,22 @@ function buildProjectNameRichText_(projectName, linkUrl) {
 
 /**
  * 昇降フラグ列(H列の変更前見込確度・I列の変更後見込確度を比較する数式が入る列)に、
- * 直前の行(templateRow)の数式をコピーして新規追記行へ適用する。
+ * 既存データ行の数式をコピーして新規追記行へ適用する。
  * GAS側では↑/↓の値を直接書き込まず、既存の数式をそのまま踏襲する方針とする
- * (数式の中身はスプレッドシート側の既存実装に委ね、GASは複製するだけに留める)。
- * コピー元となる既存行が無い、またはその行に数式が入っていない場合は何もしない。
+ * (数式の中身はスプレッドシート側の既存実装に委ね、GASは複製するだけに留める。
+ * appendStatusHistoryRows_側でもこの列には値をセットしないため、GASからの上書きは発生しない)。
+ * コピー元は直前行(templateRow)固定ではなく、templateRowから見出し行の次の行まで
+ * 遡って実際に数式が入っている最も近い行を探す(直前行だけがたまたま数式なし・空欄等の
+ * 場合でも、確実に既存の数式を引き継げるようにするため)。数式が入った行が1件も
+ * 見つからない場合のみ、数式の設定をスキップする。
  */
 function applyRankFlagFormula_(historySheet, headerMap, templateRow, newRowCount) {
   const flagCol = headerMap[CONFIG.STATUS_HISTORY_RANK_FLAG_COLUMN];
   if (!flagCol) return;
 
   const headerRowNumber = CONFIG.STATUS_HISTORY_HEADER_ROW || 1;
-  if (templateRow <= headerRowNumber) {
+  const dataStartRow = headerRowNumber + 1;
+  if (templateRow < dataStartRow) {
     Logger.log(
       '週次ステータス変更履歴: 「' + CONFIG.STATUS_HISTORY_RANK_FLAG_COLUMN +
         '」列の数式コピー元となる既存データ行が無いため、数式の設定をスキップしました。' +
@@ -500,17 +507,30 @@ function applyRankFlagFormula_(historySheet, headerMap, templateRow, newRowCount
     return;
   }
 
-  const sourceCell = historySheet.getRange(templateRow, flagCol);
-  if (!sourceCell.getFormula()) {
+  const sourceRow = findNearestFormulaRow_(historySheet, flagCol, templateRow, dataStartRow);
+  if (!sourceRow) {
     Logger.log(
-      '週次ステータス変更履歴: コピー元セル(' + templateRow + '行目「' + CONFIG.STATUS_HISTORY_RANK_FLAG_COLUMN +
-        '」列)に数式が設定されていないため、数式の設定をスキップしました。'
+      '週次ステータス変更履歴: 「' + CONFIG.STATUS_HISTORY_RANK_FLAG_COLUMN +
+        '」列に数式が設定されている既存データ行が見つからなかったため、数式の設定をスキップしました。' +
+        '(いずれか1行に手動で数式を設定しておけば、以降の追記時に自動でコピーされます)'
     );
     return;
   }
 
+  const sourceCell = historySheet.getRange(sourceRow, flagCol);
   const destinationRange = historySheet.getRange(templateRow + 1, flagCol, newRowCount, 1);
   sourceCell.copyTo(destinationRange, SpreadsheetApp.CopyPasteType.PASTE_FORMULA, false);
+}
+
+/**
+ * 指定した列(col)を、fromRow行目からminRow行目まで下から上に遡って走査し、
+ * 数式が入っている最初の行番号を返す。見つからなければnullを返す。
+ */
+function findNearestFormulaRow_(sheet, col, fromRow, minRow) {
+  for (let row = fromRow; row >= minRow; row--) {
+    if (sheet.getRange(row, col).getFormula()) return row;
+  }
+  return null;
 }
 
 /**
@@ -578,7 +598,13 @@ function onConfidenceCellEdited(e) {
     const displayName = projectName || ('(' + sheet.getName() + ' ' + editedRow + '行目)');
 
     const reason = promptForChangeReason_(displayName, oldConfidence, newConfidence);
-    const reportRowLink = '#gid=' + sheet.getSheetId() + '&range=A' + editedRow;
+    // 案件名セル(「今月」シート側)に既にリッチテキストのリンクが設定されていれば、
+    // そのリンク先URLをそのまま引き継ぐ。リンクが無いセルの場合のみ、従来通り
+    // 「今月」シートの該当行への内部リンクにフォールバックする。
+    const projectNameCol = columnLetterToIndex_(CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERS['案件名']);
+    const projectNameCell = sheet.getRange(editedRow, projectNameCol);
+    const sourceLinkUrl = getCellLinkUrl_(projectNameCell);
+    const reportRowLink = sourceLinkUrl || ('#gid=' + sheet.getSheetId() + '&range=A' + editedRow);
 
     const fields = {
       '担当': readConfidenceEditField_(rowValues, '担当'),
@@ -638,6 +664,20 @@ function readConfidenceEditField_(rowValues, fieldName) {
   if (!letter) return '';
   const col = columnLetterToIndex_(letter);
   return col <= rowValues.length ? rowValues[col - 1] : '';
+}
+
+/**
+ * セルに設定されているリッチテキストのリンク先URLを取得する。セル全体が単一のリンクとして
+ * 設定されている場合はそのURLを返し、リンクが無い場合(または取得できない場合)は空文字を返す。
+ */
+function getCellLinkUrl_(cell) {
+  try {
+    const richText = cell.getRichTextValue();
+    if (!richText) return '';
+    return richText.getLinkUrl() || '';
+  } catch (err) {
+    return '';
+  }
 }
 
 /**
