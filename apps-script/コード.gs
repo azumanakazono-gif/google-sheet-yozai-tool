@@ -30,7 +30,7 @@ const CONFIG = {
 
   // 追記先: 「31期予材リスト」スプレッドシート
   TARGET_SPREADSHEET_ID: '1zTz2lLUD6M4SPBCcEO3OBxNMmv1U7RsUYRJhkKkgOOQ',
-  TARGET_SHEET_NAME: '週次報告記録',
+  TARGET_SHEET_NAME: '報告記録',
 
   // 週次ステータス変更履歴: 「週次報告記録」への追記直後に、直近の取り込み分から
   // 「見込確度」が変更前後で変化した案件だけを抽出して記録するシート名。
@@ -387,12 +387,33 @@ function appendStatusHistoryRows_(changes) {
     return outRow;
   });
 
-  const historyLastRow = historySheet.getLastRow();
+  // getLastRow()はシート全体(どの列でもよい)の最終行を見るため、他の列に離れた場所まで
+  // 書式やゴミデータが残っていると、実際のデータより大幅に手前/先の行を誤って返すことがある。
+  // 記録日時列(通常A列)に値が入っている最終行を明示的に探し、その次の行に追記する。
+  const dateCol = historyHeaderMap[historyColumns[0]];
+  const historyLastRow = findLastRowWithValueInColumn_(historySheet, dateCol);
   const historyAppendRange = historySheet.getRange(historyLastRow + 1, 1, historyRows.length, historyTotalCols);
   writeValuesIgnoringValidation_(historyAppendRange, historyRows);
 
   applyRankFlagFormula_(historySheet, historyHeaderMap, historyLastRow, historyRows.length);
   applyProjectNameLinks_(historySheet, historyHeaderMap, historyLastRow, changes);
+}
+
+/**
+ * 指定した列(col)を上から走査し、値が入っている最終行を返す。1行も無ければ0を返す。
+ * (Sheet.getLastRow()はシート全体のどこかに値/書式があれば影響を受けるため、
+ * 特定の列に絞って「実際のデータの最終行」を求めたい場合に使う)
+ */
+function findLastRowWithValueInColumn_(sheet, col) {
+  const maxRow = sheet.getLastRow();
+  if (maxRow === 0) return 0;
+
+  const values = sheet.getRange(1, col, maxRow, 1).getValues();
+  for (let i = values.length - 1; i >= 0; i--) {
+    const value = values[i][0];
+    if (value !== '' && value !== null) return i + 1;
+  }
+  return 0;
 }
 
 /**
@@ -600,29 +621,32 @@ function writeValuesIgnoringValidation_(range, values) {
  */
 function ensureColumnsExist_(targetSheet, headerNames, defaultHeader) {
   const lastCol = targetSheet.getLastColumn();
-  let headerRow = lastCol > 0 ? targetSheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
-  let existing = headerRow.map(function (h) { return String(h).trim(); }).filter(function (h) { return h !== ''; });
+  const headerRow = lastCol > 0 ? targetSheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
+  const trimmedHeaderRow = headerRow.map(function (h) { return String(h).trim(); });
+  const hasAnyHeader = trimmedHeaderRow.some(function (h) { return h !== ''; });
 
-  if (existing.length === 0) {
-    existing = (defaultHeader || ['取込日時', '元ファイル名']).slice();
-  }
+  // 列名は実際の列位置を保ったまま保持する(空欄の列があっても詰めない)。
+  // 詰めてしまうと、それより右側の列名と実際の列位置が全てズレてしまう。
+  let columns = hasAnyHeader ? trimmedHeaderRow.slice() : (defaultHeader || ['取込日時', '元ファイル名']).slice();
+  let changed = !hasAnyHeader;
 
-  let changed = existing.length !== headerRow.length;
   headerNames.forEach(function (name) {
     const trimmed = String(name).trim();
     if (trimmed === '') return;
-    if (existing.indexOf(trimmed) === -1) {
-      existing.push(trimmed);
+    if (columns.indexOf(trimmed) === -1) {
+      columns.push(trimmed);
       changed = true;
     }
   });
 
   if (changed) {
-    targetSheet.getRange(1, 1, 1, existing.length).setValues([existing]);
+    targetSheet.getRange(1, 1, 1, columns.length).setValues([columns]);
   }
 
   const map = {};
-  existing.forEach(function (name, idx) { map[name] = idx + 1; });
+  columns.forEach(function (name, idx) {
+    if (name !== '') map[name] = idx + 1;
+  });
   return map;
 }
 

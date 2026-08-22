@@ -13,7 +13,7 @@ const CONFIG = {
 
   // 追記先: 「31期予材リスト」スプレッドシート
   TARGET_SPREADSHEET_ID: '1zTz2lLUD6M4SPBCcEO3OBxNMmv1U7RsUYRJhkKkgOOQ',
-  TARGET_SHEET_NAME: '週次報告記録',
+  TARGET_SHEET_NAME: '報告記録',
 
   // 週次ステータス変更履歴: 「週次報告記録」への追記直後に、直近の取り込み分から
   // 「見込確度」が変更前後で変化した案件だけを抽出して記録するシート名。
