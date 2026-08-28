@@ -2,30 +2,20 @@
  * 予材リスト週次同期スクリプト（単一ファイル版）
  *
  * - SOURCE_FOLDER_ID 配下のANDPAD出力Excelファイル（Googleスプレッドシートも可）を読み取り、
- *   「31期予材リスト」の「報告記録」シート末尾に追記する。
+ *   「31期予材リスト」の「週次報告記録」シート末尾に追記する。
  * - Excelファイルは DriveApp + Utilities.unzip + XmlService のみで直接パースする（Advanced Drive
  *   Service、UrlFetchApp、外部API呼び出しは一切使わない）。ANDPAD等の「拡張子は.xlsxだが中身は
- *   標準ZIPではない(HTMLテーブル等)」出力にも対応するため、先頭バイトで実体を判別し、
- *   ZIP/.xlsx・HTMLテーブルの2通りの読み取り方法へ自動でフォールバックする。
+ *   標準ZIPではない(HTMLテーブルやCSV/TSV等)」出力にも対応するため、先頭バイトや中身のテキストで
+ *   実体を判別し、ZIP/.xlsx・HTMLテーブル・CSV/TSVの読み取り方法へ自動でフォールバックする。
  * - 列はヘッダー名でマッチングするため、ANDPAD側の列順変更や列追加に強い。
  * - 転記済みファイルは「処理済み」フォルダへ移動し、同名ファイルがあればリネームして衝突を回避する。
  * - 万一の移動失敗に備え、処理済みファイルIDをスクリプトプロパティに記録し、再走時の二重追記を防ぐ。
- * - 「対象期間」の区切り行は挿入せず、読み取ったデータをそのまま「報告記録」シート末尾に
- *   追記する(ソートや区切り行の再構築は行わない)。
- * - 「今月」を含むシート名の5行目以降・O列(見込確度)の編集を検知し、「報告記録」と
- *   「週次ステータス変更履歴」へ自動転記する(onEdit)。この機能は、このスクリプトが
- *   「31期予材リスト」のコンテナバインド型スクリプトとして設置されている場合のみ動作する。
- * - 「今月」タブのH列(案件名テキスト+ハイパーリンク)を、「週次ステータス変更履歴」のC列
- *   (案件名)へ自動でコピーする。既存行に一括適用したい場合は applyProjectLinksToStatusHistory()
- *   を手動実行する。
  *
  * 事前準備:
  *   1. appsscript.json の内容をマニフェストに反映する（エディタで「"appsscript.json"
  *      マニフェスト ファイルをエディタで表示する」を有効にすると編集できる）。
  *      GASの「サービス」から何かを追加する必要はない。
  *   2. このファイルの内容を「コード.gs」に丸ごと貼り付ける（既存の中身は全削除してから貼り付けること）。
- *      貼り付け後は Ctrl+End (Mac: Cmd+End) でファイル末尾に移動し、最後の "}" の後に
- *      余分な文字が残っていないことを目視確認する。
  */
 
 // ===== 設定値 =====
@@ -42,6 +32,74 @@ const CONFIG = {
   TARGET_SPREADSHEET_ID: '1zTz2lLUD6M4SPBCcEO3OBxNMmv1U7RsUYRJhkKkgOOQ',
   TARGET_SHEET_NAME: '報告記録',
 
+  // 週次ステータス変更履歴: 「週次報告記録」への追記直後に、直近の取り込み分から
+  // 「見込確度」が変更前後で変化した案件だけを抽出して記録するシート名。
+  STATUS_HISTORY_SHEET_NAME: '週次ステータス変更履歴',
+  // 履歴シートの実際のレイアウト: 1行目=タイトル行、2行目=列見出し行、3行目以降=データ行。
+  // ヘッダー(列見出し)が入っている行番号。ensureColumnsExist_・追記位置の判定の両方で使う。
+  STATUS_HISTORY_HEADER_ROW: 2,
+  // 「記録日時」列(A列)に書き込む日時文字列のフォーマット(Utilities.formatDate準拠)。
+  // 日付だけでなく時刻まで含めて記録するため、Dateオブジェクトのままではなく
+  // この書式の文字列に変換してから書き込む(buildStatusHistoryChange_を参照)。
+  STATUS_HISTORY_TIMESTAMP_FORMAT: 'yyyy/MM/dd HH:mm:ss',
+  // 履歴シートの列構成(既存シートの列順・列名に合わせてある)。
+  // シートが空の場合はこの並びでヘッダーを新規作成し、既にヘッダーがある場合は
+  // 名前が一致する列にだけ書き込む(他の既存列には影響しない)。
+  // 「昇降フラグ」列はH列(変更前見込確度)・I列(変更後見込確度)を比較する数式が
+  // シート側に組み込まれているため、GASからは値を書き込まない(既存行の数式を
+  // コピーして新規行に適用するのみ。applyRankFlagFormula_を参照)。
+  STATUS_HISTORY_COLUMNS: [
+    '記録日時', '担当', '案件名', 'カテゴリ',
+    '次回アクション予定日時', 'ネクストアクション', '昇降フラグ',
+    '変更前見込確度', '変更後見込確度', '変更経緯',
+    '最新見積格納日', '契約見込月', '税込想定売上', '貢献利益率'
+  ],
+  // 昇降フラグ列の名前。数式で↑/↓が算出される列のため、GASは値を書き込まず、
+  // 既存行の数式をコピーして新規行に適用するためだけに使う。
+  STATUS_HISTORY_RANK_FLAG_COLUMN: '昇降フラグ',
+  // 案件名列(既存シートの見た目に合わせたリンク色)。既定はGoogle Sheetsのリンク標準色。
+  STATUS_HISTORY_LINK_COLOR: '#1155cc',
+  // 「週次報告記録」内で案件を一意に識別するための列名候補(先頭から順に探し、
+  // 最初に見つかった列をキーとして使う)。実際のANDPAD出力列名に合わせて調整すること。
+  STATUS_HISTORY_KEY_COLUMN_CANDIDATES: ['案件名'],
+  // 転記条件となる「見込確度」列の名前候補(「週次報告記録」側の列名)。
+  // 実際のANDPAD出力列名に合わせて調整すること。
+  STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES: ['見込確度', '確度'],
+  // 履歴シートの各列に、「週次報告記録」側のどの列の値を転記するかの対応表。
+  // 値は「週次報告記録」側の列名候補の配列(先頭から探して最初に見つかったものを使う)。
+  // 記録日時・案件名・昇降フラグ・変更前後の見込確度・変更経緯は別途組み立てるため、
+  // ここには含めない。
+  STATUS_HISTORY_FIELD_SOURCE_COLUMNS: {
+    '担当': ['担当'],
+    'カテゴリ': ['カテゴリ'],
+    '次回アクション予定日時': ['次回アクション予定日時'],
+    'ネクストアクション': ['ネクストアクション'],
+    '最新見積格納日': ['最新見積格納日'],
+    '契約見込月': ['契約見込月'],
+    '税込想定売上': ['税込想定売上'],
+    '貢献利益率': ['貢献利益率']
+  },
+
+  // 「今月」等の予材シートでO列(見込確度)が手動編集された際に、変更理由の入力ダイアログを
+  // 表示して「週次ステータス変更履歴」に記録する機能(onConfidenceCellEdited)で使う設定。
+  // 対象とする予材シート名(複数可)。実際の運用シート名に合わせて追加・変更すること。
+  CONFIDENCE_EDIT_SHEET_NAMES: ['今月'],
+  // 「今月」シートは列見出しが「週次報告記録」側と一致しない(または見出し行の構成が異なる)ため、
+  // ヘッダー名でのマッチングは行わず、ここに設定した固定の列位置から直接値を抽出する。
+  // 実際の「今月」シートの列位置に合わせて調整すること。
+  CONFIDENCE_EDIT_COLUMN_LETTERS: {
+    '案件名': 'H',
+    '担当': 'G',
+    'カテゴリ': 'P',
+    '次回アクション予定日時': 'C',
+    'ネクストアクション': 'D',
+    '見込確度': 'O',
+    '最新見積格納日': 'J',
+    '契約見込月': 'R',
+    '税込想定売上': 'K',
+    '貢献利益率': 'L'
+  },
+
   // 取り込み元ファイルの1行目がヘッダー行かどうか
   SOURCE_HAS_HEADER: true,
 
@@ -51,95 +109,10 @@ const CONFIG = {
   TIME_ZONE: 'Asia/Tokyo',
 
   // 処理済みファイルIDを記録しておく数（moveTo失敗時などの二重処理を防ぐ保険）
-  PROCESSED_LOG_MAX: 300,
-
-  // CVR集計用の正規列名。ANDPAD側の表記ゆれ(別名)を吸収し、必ずこの列名に正規化して書き込む。
-  // key: 報告記録シート上の正規列名 / value: ANDPAD側で使われうる別名(表記ゆれ)の配列。
-  // ここに無い列名は元の名前のまま追記される(自動追加)ので、ANDPAD側の実際の項目名を
-  // 確認のうえ、必要な別名を随時この配列に追加すること。
-  // CVR集計はANDPAD報告画面の4ステータス「アプローチ」「面談」「提案（見積提示）」「契約」を
-  // 基準とする。各ステータスの到達日を以下の正規列名で保持し、
-  //   ①アプローチ→面談CVR = 面談数 ÷ アプローチ数
-  //   ②面談→提案（見積提示）CVR = 提案数 ÷ 面談数
-  //   ③提案（見積提示）→契約CVR = 契約数 ÷ 提案数
-  // を算出する(詳細はCVR_KPI_DESIGN.md参照)。「提案（見積提示）」はANDPAD側の表記が
-  // 全角/半角カッコや「見積日」「提案日」など揺れうるため、別名を広めに登録している。
-  STAGE_COLUMN_ALIASES: {
-    '案件種別': ['案件種別', '案件区分', '種別'],
-    '属性': ['属性', '顧客属性', '反響属性'],
-    'アプローチ日': ['アプローチ日', '初回アプローチ日', '初回接触日', '反響日', 'アプローチ'],
-    '面談日': ['面談日', '面談実施日', '打合せ日', '初回面談日', '面談'],
-    '提案日': [
-      '提案日', '提案（見積提示）', '提案(見積提示)',
-      '提案（見積提示）日', '提案(見積提示)日',
-      '見積日', '見積提出日', '御見積日', '見積書提出日', '提案書提出日'
-    ],
-    '契約日': ['契約日', '成約日', '受注日', '契約']
-  },
-
-  // ===== 案件種別の自動判定(カテゴリ分類) =====
-  // 「案件（引合）名」のテキストに含まれるキーワードから「案件種別」列の値を自動判定する
-  // (classifyCategory_)。データ入力規則で定義されている15カテゴリ(「風力」は対象外)を
-  // 優先順位の高い順に並べている。上から順にキーワードを走査し、最初に一致したカテゴリを
-  // 採用する。どれにも一致しない場合はCATEGORY_FALLBACKを使う。
-  // 実際のANDPAD案件名の表記に合わせて、随時keywordsを追加・調整すること。
-  CATEGORY_RULES: [
-    { category: '事業者用PV', keywords: ['事業者用PV', '事業用PV', '産業用PV'] },
-    { category: 'リパワリング', keywords: ['リパワリング', 'リパワー'] },
-    { category: '事業者PCS交換', keywords: ['事業者PCS交換', '事業用PCS交換', '産業用PCS交換'] },
-    { category: 'リプレイス', keywords: ['リプレイス'] },
-    { category: '事業者用創蓄', keywords: ['事業者用創蓄', '事業用創蓄', '産業用創蓄', '事業者用蓄電池'] },
-    { category: '住宅用PV', keywords: ['住宅用PV'] },
-    { category: '住宅用創蓄', keywords: ['住宅用創蓄', '住宅用蓄電池'] },
-    { category: 'EV充放電システム', keywords: ['EV充放電システム', 'EV充放電'] },
-    { category: '戸建てPCS交換', keywords: ['戸建てPCS交換', '戸建PCS交換'] },
-    { category: 'EQ/オール電化', keywords: ['EQ/オール電化', 'EQ／オール電化', 'オール電化', 'EQ'] },
-    { category: 'O&M', keywords: ['O&M', 'O＆M', 'Ｏ&Ｍ', 'Ｏ＆Ｍ'] },
-    { category: 'メンテナンス', keywords: ['メンテナンス', 'メンテ'] },
-    { category: "LED'S", keywords: ["LED'S", 'LED’S', 'LEDS'] },
-    { category: '行政案件', keywords: ['行政案件', '行政'] }
-    // 「その他」は上記いずれにも一致しなかった場合のフォールバック(CATEGORY_FALLBACK)として扱うため、
-    // ルール一覧には含めない。
-  ],
-  // 上記いずれのキーワードにも一致しなかった場合に「案件種別」へ設定する値。
-  CATEGORY_FALLBACK: 'その他',
-  // 「案件種別」を自動判定する元になる、案件名が入っている列のヘッダー名候補。
-  // ANDPAD側の表記ゆれ(「案件名」「引合名」など)を吸収するため、上から順に一致する列を探す。
-  PROJECT_NAME_COLUMN_CANDIDATES: ['案件（引合）名', '案件(引合)名', '案件名', '引合名', '案件名称'],
-
-  // ===== 転記対象の最大列数 =====
-  // 「報告記録」シートへ転記する列はこの列数まで（既定: 30列目 = AD列）。
-  // それ以降の列は不要なデータのため、ヘッダー追加・値の書き込みともに対象外とする。
-  // ANDPAD側の列(元24列)に加え、STAGE_COLUMN_ALIASESのCVR集計用6列(案件種別/属性/
-  // アプローチ日/面談日/提案日/契約日)が収まるよう6列分の余裕を持たせている。
-  MAX_DATA_COLUMNS: 30,
-
-  // ===== 編集時トリガー(onEdit)設定 =====
-  // シート名にこの文字列を含む場合のみ編集を監視する
-  EDIT_SHEET_NAME_KEYWORD: '今月',
-  // 監視対象の開始行（この行以降の編集のみを対象にする。見出し・集計行等を除外するため）
-  EDIT_MIN_ROW: 5,
-  // 監視対象の列（既定: O列 = 15列目, 見込確度）
-  EDIT_TARGET_COLUMN: 15,
-  // 「今月」シート側のヘッダー行番号（列名マッチングに使用。実際のシート構成に合わせて調整すること）
-  EDIT_HEADER_ROW: 4,
-  // 識別情報として転記する列数（1列目からこの列数まで。案件名・得意先名などの識別列を想定）
-  EDIT_IDENTIFIER_COLUMN_COUNT: 14,
-  // 1回の編集イベントで処理する最大行数（大量範囲貼り付け時のタイムアウト防止）
-  EDIT_MAX_ROWS_PER_EVENT: 200,
-  // ステータス変更履歴の記録先シート名
-  STATUS_HISTORY_SHEET_NAME: '週次ステータス変更履歴',
-
-  // ===== 「週次ステータス変更履歴」の案件名ハイパーリンク =====
-  // 「今月」タブのこの列(既定: H列)には、案件名テキストにURLへのハイパーリンクが
-  // 設定されている。同じテキスト+リンクを「週次ステータス変更履歴」の
-  // STATUS_HISTORY_PROJECT_COLUMNへ自動でコピーする。
-  EDIT_URL_COLUMN: 8,
-  // 「週次ステータス変更履歴」側で案件名+ハイパーリンクを表示する列（既定: 3列目 = C列）
-  STATUS_HISTORY_PROJECT_COLUMN: 3
+  PROCESSED_LOG_MAX: 300
 };
 
-// ===== メイン処理 (週次自動転記) =====
+// ===== メイン処理 =====
 
 function syncWeeklyReports() {
   const lock = LockService.getScriptLock();
@@ -209,7 +182,6 @@ function syncWeeklyReports() {
 /**
  * 1ファイル分のデータを読み取り、対象シートの末尾に追記する。
  * 列はヘッダー名でマッチングするため、ANDPAD側の列順・列追加の揺れを吸収する。
- * 「対象期間」の区切り行は挿入せず、読み取った行をそのままシート末尾へ追記するだけである。
  */
 function appendFileToTargetSheet_(file, targetSheet) {
   const mimeType = file.getMimeType();
@@ -222,15 +194,12 @@ function appendFileToTargetSheet_(file, targetSheet) {
       throw new Error('Googleスプレッドシートとして開けませんでした(id: ' + file.getId() + ')。詳細: ' + e);
     }
   } else {
-    values = readXlsxAsValues_(file);
+    values = parseWeeklyReportFile_(file);
   }
 
   if (values.length === 0) {
-    // 空のまま「処理済み」として静かに移動してしまうと、パースの取りこぼしに気づけない
-    // (ファイル自体は失われる)ため、エラーとして扱いエラーフォルダへ移動・通知の対象にする。
-    throw new Error(
-      'ファイルからデータを1行も読み取れませんでした。ANDPAD側の出力形式が変わっていないか確認してください。'
-    );
+    Logger.log('データなし: ' + file.getName());
+    return;
   }
 
   const hasHeader = CONFIG.SOURCE_HAS_HEADER;
@@ -241,146 +210,595 @@ function appendFileToTargetSheet_(file, targetSheet) {
   });
 
   if (dataRows.length === 0) {
-    // 上と同様、ヘッダー行しか読み取れなかった場合も静かにスキップせずエラーとして扱う。
-    throw new Error(
-      'ヘッダー行を除くとデータ行が1件もありませんでした。ANDPAD側の出力形式が変わっていないか確認してください。'
-    );
+    Logger.log('データ行なし: ' + file.getName());
+    return;
   }
 
-  // CVR集計列(案件種別/属性/アプローチ日/面談日/提案日/契約日)は表記ゆれを吸収して正規化し、
-  // かつ今回のファイルに列が無くてもシート上には必ず存在させる(CVR集計式の列位置を安定させるため)。
-  const canonicalHeader = sourceHeader.map(resolveCanonicalHeader_);
-  const stageColumnNames = Object.keys(CONFIG.STAGE_COLUMN_ALIASES || {});
-  const headerMap = ensureColumnsExist_(targetSheet, canonicalHeader.concat(stageColumnNames));
-  const totalCols = Math.min(targetSheet.getLastColumn(), CONFIG.MAX_DATA_COLUMNS);
+  const headerMap = ensureColumnsExist_(targetSheet, sourceHeader);
+  const totalCols = targetSheet.getLastColumn();
   const timestamp = new Date();
-
-  // 「案件種別」はANDPAD側の値をそのまま転記せず、案件(引合)名のテキストから
-  // classifyCategory_で自動判定して上書きする(カテゴリ別CVR集計を固定15分類で行うため)。
-  const projectNameColIdx = sourceHeader.findIndex(function (name) {
-    return (CONFIG.PROJECT_NAME_COLUMN_CANDIDATES || []).indexOf(name) !== -1;
-  });
 
   const rowsToAppend = dataRows.map(function (row) {
     const outRow = new Array(totalCols).fill('');
     outRow[headerMap['取込日時'] - 1] = timestamp;
     outRow[headerMap['元ファイル名'] - 1] = file.getName();
-    canonicalHeader.forEach(function (colName, idx) {
+    sourceHeader.forEach(function (colName, idx) {
       if (!colName) return;
       const col = headerMap[colName];
-      if (col && col <= totalCols) outRow[col - 1] = row[idx];
+      if (col) outRow[col - 1] = row[idx];
     });
-    if (projectNameColIdx !== -1 && headerMap['案件種別'] && headerMap['案件種別'] <= totalCols) {
-      outRow[headerMap['案件種別'] - 1] = classifyCategory_(row[projectNameColIdx]);
-    }
     return outRow;
   });
 
   const lastRow = targetSheet.getLastRow();
-  targetSheet.getRange(lastRow + 1, 1, rowsToAppend.length, totalCols).setValues(rowsToAppend);
+  // 変更検知は「今回追記する内容」と「追記前に既にシートにあった内容」を比較するため、
+  // 追記より前にこの時点の既存データを読み取っておく。
+  const previousRows = lastRow > 1
+    ? targetSheet.getRange(2, 1, lastRow - 1, totalCols).getValues()
+    : [];
+
+  const appendRange = targetSheet.getRange(lastRow + 1, 1, rowsToAppend.length, totalCols);
+  writeValuesIgnoringValidation_(appendRange, rowsToAppend);
+
+  try {
+    updateWeeklyStatusHistory_(targetSheet, lastRow, headerMap, previousRows, rowsToAppend, timestamp);
+  } catch (historyErr) {
+    // 履歴記録の失敗は「報告記録」への追記そのものを失敗させたくないため、ここで握りつぶす。
+    Logger.log(
+      '週次ステータス変更履歴の更新に失敗しました(報告記録への追記自体は成功しています): ' +
+        file.getName() + ' / ' + historyErr
+    );
+  }
 }
 
 /**
- * 対象シートのヘッダー行(1行目)に、渡された列名のうち未登録のものを追加する。
- * ヘッダーが空の場合は「取込日時」「元ファイル名」から作成する。
- * MAX_DATA_COLUMNS(既定: 24列目 = X列)に達している場合、それ以降の新規列は追加しない
- * (Y列以降は転記対象外のため)。
- * 戻り値: { 列名: 列番号(1始まり) } のマップ
+ * 「週次報告記録」への直近の追記分(newRows)を、追記前の既存データ(previousRows)と
+ * 案件単位で突き合わせ、「見込確度」(CONFIG.STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES)が
+ * 変更前後で変化した案件だけを抽出して「週次ステータス変更履歴」シートの末尾に記録する。
+ * (ステータスや進捗など見込確度以外の変更は転記対象にしない)
+ * 案件を識別するキー列や見込確度列が「週次報告記録」に存在しない場合は、何もせずスキップする。
+ * reportSheet・reportLastRow(追記前の最終行)は、履歴側の案件名セルに「週次報告記録」の
+ * 該当行へ飛べるリンクを張るために使う(リンク自体の見た目はbuildStatusHistoryChange_を参照)。
  */
-function ensureColumnsExist_(targetSheet, headerNames) {
-  const lastCol = targetSheet.getLastColumn();
-  let headerRow = lastCol > 0 ? targetSheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
-  let existing = headerRow.map(function (h) { return String(h).trim(); }).filter(function (h) { return h !== ''; });
+function updateWeeklyStatusHistory_(reportSheet, reportLastRow, headerMap, previousRows, newRows, timestamp) {
+  const keyCol = findHeaderColumnIndex_(headerMap, CONFIG.STATUS_HISTORY_KEY_COLUMN_CANDIDATES);
+  const confidenceCol = findHeaderColumnIndex_(headerMap, CONFIG.STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES);
 
-  if (existing.length === 0) {
-    existing = ['取込日時', '元ファイル名'];
+  if (!keyCol || !confidenceCol) {
+    Logger.log(
+      '週次ステータス変更履歴: 案件識別列(' + CONFIG.STATUS_HISTORY_KEY_COLUMN_CANDIDATES.join('/') +
+        ')または見込確度列(' + CONFIG.STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES.join('/') +
+        ')が「' + CONFIG.TARGET_SHEET_NAME + '」に見つからないため、変更履歴の記録をスキップします。'
+    );
+    return;
   }
 
-  let changed = existing.length !== headerRow.length;
+  // 案件(キー列の値)ごとに「直前の状態」を引けるようにする。同じ案件が複数行あっても、
+  // 後の行で上書きされるため常に最後に登場した行が残る。
+  const previousByKey = {};
+  previousRows.forEach(function (row) {
+    const key = String(row[keyCol - 1]).trim();
+    if (key === '') return;
+    previousByKey[key] = row;
+  });
+
+  const reportSheetId = reportSheet.getSheetId();
+  const changes = [];
+  newRows.forEach(function (row, index) {
+    const key = String(row[keyCol - 1]).trim();
+    if (key === '') return;
+
+    const previousRow = previousByKey[key];
+    if (previousRow) {
+      const oldConfidence = previousRow[confidenceCol - 1];
+      const newConfidence = row[confidenceCol - 1];
+      // 転記条件: 変更前見込確度が存在し(空欄の新規登録は除外)、かつ変更前後で
+      // 値が異なる(実際に確度の昇降があった)案件のみを対象にする。
+      const hasOldConfidence = normalizeHistoryValue_(oldConfidence) !== '';
+      if (hasOldConfidence && !historyValuesEqual_(oldConfidence, newConfidence)) {
+        // newRowsはreportLastRow+1行目から順に書き込まれているため、行番号を逆算できる。
+        const reportRow = reportLastRow + 1 + index;
+        const reportRowLink = '#gid=' + reportSheetId + '&range=A' + reportRow;
+        const fields = {};
+        Object.keys(CONFIG.STATUS_HISTORY_FIELD_SOURCE_COLUMNS).forEach(function (name) {
+          fields[name] = readTrackedField_(headerMap, row, CONFIG.STATUS_HISTORY_FIELD_SOURCE_COLUMNS[name]);
+        });
+        changes.push(
+          buildStatusHistoryChange_(fields, key, oldConfidence, newConfidence, timestamp, reportRowLink)
+        );
+      }
+    }
+
+    // 初登場の案件は比較対象がないため対象外。以降の比較のために直前状態を更新する。
+    previousByKey[key] = row;
+  });
+
+  if (changes.length === 0) return;
+
+  appendStatusHistoryRows_(changes);
+}
+
+/**
+ * 1件の見込確度変更を、「週次ステータス変更履歴」シートの列名をキーとしたオブジェクトに組み立てる。
+ * fieldsは呼び出し元(週次同期側はヘッダー名マッチング、手動編集側は固定列位置)で既に
+ * 解決済みの値を{ '担当': ..., 'カテゴリ': ..., ... }の形で渡す(値の取得元を問わない)。
+ * 昇降フラグ(↑/↓)はH列・I列(変更前後の見込確度)を比較するスプレッドシート側の数式で
+ * 算出される列のため、ここでは値をセットしない(applyRankFlagFormula_で数式をコピーする)。
+ * reportRowLinkは案件名セルに張るリンク(該当行への内部リンク)のURLで、
+ * applyProjectNameLinks_でリッチテキストとして反映される(この関数自体はセル値を書かない)。
+ * reasonText(省略可)は手動編集時の変更理由(onConfidenceCellEdited参照)で、そのまま
+ * 「変更経緯」に書き込む(自動生成の説明文は付与しない。未入力/キャンセル時・バッチ取り込み時は空文字)。
+ */
+function buildStatusHistoryChange_(fields, projectName, oldConfidence, newConfidence, timestamp, reportRowLink, reasonText) {
+  const change = {};
+  change['記録日時'] = Utilities.formatDate(timestamp, CONFIG.TIME_ZONE, CONFIG.STATUS_HISTORY_TIMESTAMP_FORMAT);
+  change['担当'] = fields['担当'] || '';
+  change['案件名'] = projectName;
+  change['__案件名リンクURL'] = reportRowLink;
+  change['カテゴリ'] = fields['カテゴリ'] || '';
+  change['次回アクション予定日時'] = fields['次回アクション予定日時'] || '';
+  change['ネクストアクション'] = fields['ネクストアクション'] || '';
+  change['変更前見込確度'] = oldConfidence;
+  change['変更後見込確度'] = newConfidence;
+  change['変更経緯'] = reasonText || '';
+  change['最新見積格納日'] = fields['最新見積格納日'] || '';
+  change['契約見込月'] = fields['契約見込月'] || '';
+  change['税込想定売上'] = fields['税込想定売上'] || '';
+  change['貢献利益率'] = fields['貢献利益率'] || '';
+  return change;
+}
+
+/**
+ * 「週次報告記録」側の候補列名リストから最初に見つかった列の値を読み取る。
+ * どれも見つからない場合は空文字を返す。
+ */
+function readTrackedField_(headerMap, row, candidateNames) {
+  const col = findHeaderColumnIndex_(headerMap, candidateNames || []);
+  return col ? row[col - 1] : '';
+}
+
+/**
+ * headerMapの中から、候補列名リストの先頭から見て最初に存在する列番号を返す。
+ * 1つも見つからない場合はnullを返す。
+ */
+function findHeaderColumnIndex_(headerMap, candidateNames) {
+  for (let i = 0; i < candidateNames.length; i++) {
+    if (headerMap[candidateNames[i]]) return headerMap[candidateNames[i]];
+  }
+  return null;
+}
+
+/**
+ * 履歴の変更判定用に2つのセル値を比較する。null/undefined/空文字は同一視し、
+ * それ以外は文字列化してトリムした上で比較する(数値と数値文字列などの揺れを吸収)。
+ */
+function historyValuesEqual_(a, b) {
+  return normalizeHistoryValue_(a) === normalizeHistoryValue_(b);
+}
+
+function normalizeHistoryValue_(value) {
+  if (value === null || value === undefined) return '';
+  if (value instanceof Date) return String(value.getTime());
+  return String(value).trim();
+}
+
+/**
+ * 履歴の表示用に値を整形する。空欄は「(空欄)」と表示する。
+ */
+function formatHistoryValue_(value) {
+  const normalized = value === null || value === undefined ? '' : String(value).trim();
+  return normalized === '' ? '(空欄)' : normalized;
+}
+
+/**
+ * 見込確度が変化した案件を「週次ステータス変更履歴」シートの末尾に追記する。
+ * 列はCONFIG.STATUS_HISTORY_COLUMNSの名前でマッチングするため、シート側の列順が
+ * 変わっていても正しい列に入り、シートが空の場合はこの並びでヘッダーを新規作成する。
+ */
+function appendStatusHistoryRows_(changes) {
+  const historySheet = getOrCreateStatusHistorySheet_();
+  const historyColumns = CONFIG.STATUS_HISTORY_COLUMNS;
+  const headerRowNumber = CONFIG.STATUS_HISTORY_HEADER_ROW || 1;
+  const historyHeaderMap = ensureColumnsExist_(historySheet, historyColumns, historyColumns, headerRowNumber);
+  const historyTotalCols = historySheet.getLastColumn();
+
+  const historyRows = changes.map(function (change) {
+    const outRow = new Array(historyTotalCols).fill('');
+    historyColumns.forEach(function (colName) {
+      const col = historyHeaderMap[colName];
+      if (col && change[colName] !== undefined) {
+        outRow[col - 1] = change[colName];
+      }
+    });
+    return outRow;
+  });
+
+  // getLastRow()はシート全体(どの列でもよい)の最終行を見るため、他の列に離れた場所まで
+  // 書式やゴミデータが残っていると、実際のデータより大幅に手前/先の行を誤って返すことがある。
+  // また、このシートは1行目=タイトル・headerRowNumber行目=列見出しの構成のため、
+  // 記録日時列(通常A列)のうちデータ領域(見出し行の次の行以降)だけを対象に、
+  // 値が入っている最終行を明示的に探して、その次の行に追記する。
+  const dateCol = historyHeaderMap[historyColumns[0]];
+  const dataStartRow = headerRowNumber + 1;
+  const historyLastRow = findLastRowWithValueInColumn_(historySheet, dateCol, dataStartRow);
+  const historyAppendRange = historySheet.getRange(historyLastRow + 1, 1, historyRows.length, historyTotalCols);
+  writeValuesIgnoringValidation_(historyAppendRange, historyRows);
+
+  applyRankFlagFormula_(historySheet, historyHeaderMap, historyLastRow, historyRows.length);
+  applyProjectNameLinks_(historySheet, historyHeaderMap, historyLastRow, changes);
+}
+
+/**
+ * 指定した列(col)のうち、startRow行目以降(タイトル行・ヘッダー行より下のデータ領域)を
+ * 上から走査し、値が入っている最終行を返す。1行も無ければ(startRow - 1)を返す
+ * (=呼び出し側はその次の行、つまりstartRowから安全に追記できる)。
+ * (Sheet.getLastRow()はシート全体のどこかに値/書式があれば影響を受けるため、
+ * 特定の列・特定の開始行に絞って「実際のデータの最終行」を求めたい場合に使う)
+ */
+function findLastRowWithValueInColumn_(sheet, col, startRow) {
+  const searchStartRow = startRow || 1;
+  const maxRow = sheet.getLastRow();
+  if (maxRow < searchStartRow) return searchStartRow - 1;
+
+  const numRows = maxRow - searchStartRow + 1;
+  const values = sheet.getRange(searchStartRow, col, numRows, 1).getValues();
+  for (let i = values.length - 1; i >= 0; i--) {
+    const value = values[i][0];
+    if (value !== '' && value !== null) return searchStartRow + i;
+  }
+  return searchStartRow - 1;
+}
+
+/**
+ * 案件名列に、既存シートの見た目(リンク青色 + 下線)に合わせたリッチテキストを設定する。
+ * リンク先はchange['__案件名リンクURL']に組み立て済みの「週次報告記録」該当行への
+ * 内部リンクで、リンクが無い場合(reportSheetの行が特定できなかった場合)でも
+ * 色・下線のスタイルだけは既存の見た目に合わせて適用する。
+ */
+function applyProjectNameLinks_(historySheet, headerMap, templateRow, changes) {
+  const nameCol = headerMap['案件名'];
+  if (!nameCol) return;
+
+  const richTextValues = changes.map(function (change) {
+    return [buildProjectNameRichText_(change['案件名'], change['__案件名リンクURL'])];
+  });
+
+  const destinationRange = historySheet.getRange(templateRow + 1, nameCol, changes.length, 1);
+  destinationRange.setRichTextValues(richTextValues);
+}
+
+/**
+ * 案件名セル用のリッチテキストを組み立てる。既存シートの案件名リンクと同じ見た目
+ * (フォントカラー: CONFIG.STATUS_HISTORY_LINK_COLOR、下線あり)にし、linkUrlが
+ * 渡された場合はそのURLへのリンクとしてセットする。
+ */
+function buildProjectNameRichText_(projectName, linkUrl) {
+  const style = SpreadsheetApp.newTextStyle()
+    .setForegroundColor(CONFIG.STATUS_HISTORY_LINK_COLOR)
+    .setUnderline(true)
+    .build();
+  const builder = SpreadsheetApp.newRichTextValue().setText(String(projectName)).setTextStyle(style);
+  if (linkUrl) {
+    builder.setLinkUrl(linkUrl);
+  }
+  return builder.build();
+}
+
+/**
+ * 昇降フラグ列(H列の変更前見込確度・I列の変更後見込確度を比較する数式が入る列)に、
+ * 既存データ行の数式をコピーして新規追記行へ適用する。
+ * GAS側では↑/↓の値を直接書き込まず、既存の数式をそのまま踏襲する方針とする
+ * (数式の中身はスプレッドシート側の既存実装に委ね、GASは複製するだけに留める。
+ * appendStatusHistoryRows_側でもこの列には値をセットしないため、GASからの上書きは発生しない)。
+ * コピー元は直前行(templateRow)固定ではなく、templateRowから見出し行の次の行まで
+ * 遡って実際に数式が入っている最も近い行を探す(直前行だけがたまたま数式なし・空欄等の
+ * 場合でも、確実に既存の数式を引き継げるようにするため)。数式が入った行が1件も
+ * 見つからない場合のみ、数式の設定をスキップする。
+ */
+function applyRankFlagFormula_(historySheet, headerMap, templateRow, newRowCount) {
+  const flagCol = headerMap[CONFIG.STATUS_HISTORY_RANK_FLAG_COLUMN];
+  if (!flagCol) return;
+
+  const headerRowNumber = CONFIG.STATUS_HISTORY_HEADER_ROW || 1;
+  const dataStartRow = headerRowNumber + 1;
+  if (templateRow < dataStartRow) {
+    Logger.log(
+      '週次ステータス変更履歴: 「' + CONFIG.STATUS_HISTORY_RANK_FLAG_COLUMN +
+        '」列の数式コピー元となる既存データ行が無いため、数式の設定をスキップしました。' +
+        '(いずれか1行に手動で数式を設定しておけば、以降の追記時に自動でコピーされます)'
+    );
+    return;
+  }
+
+  const sourceRow = findNearestFormulaRow_(historySheet, flagCol, templateRow, dataStartRow);
+  if (!sourceRow) {
+    Logger.log(
+      '週次ステータス変更履歴: 「' + CONFIG.STATUS_HISTORY_RANK_FLAG_COLUMN +
+        '」列に数式が設定されている既存データ行が見つからなかったため、数式の設定をスキップしました。' +
+        '(いずれか1行に手動で数式を設定しておけば、以降の追記時に自動でコピーされます)'
+    );
+    return;
+  }
+
+  const sourceCell = historySheet.getRange(sourceRow, flagCol);
+  const destinationRange = historySheet.getRange(templateRow + 1, flagCol, newRowCount, 1);
+  sourceCell.copyTo(destinationRange, SpreadsheetApp.CopyPasteType.PASTE_FORMULA, false);
+}
+
+/**
+ * 指定した列(col)を、fromRow行目からminRow行目まで下から上に遡って走査し、
+ * 数式が入っている最初の行番号を返す。見つからなければnullを返す。
+ */
+function findNearestFormulaRow_(sheet, col, fromRow, minRow) {
+  for (let row = fromRow; row >= minRow; row--) {
+    if (sheet.getRange(row, col).getFormula()) return row;
+  }
+  return null;
+}
+
+/**
+ * 「週次ステータス変更履歴」シートを取得する。存在しなければ新規作成する。
+ */
+function getOrCreateStatusHistorySheet_() {
+  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  let sheet = ss.getSheetByName(CONFIG.STATUS_HISTORY_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(CONFIG.STATUS_HISTORY_SHEET_NAME);
+  }
+  return sheet;
+}
+
+/**
+ * 「今月」等の予材シート(CONFIG.CONFIDENCE_EDIT_SHEET_NAMES)で見込確度列が手動編集された際に、
+ * ポップアップ(Ui.prompt)で変更理由を入力させ、「週次ステータス変更履歴」へ記録する。
+ *
+ * 【重要】単純トリガーのonEdit(e)はダイアログ(Ui.prompt/Browser.inputBox)を表示できないため、
+ * この関数は installConfidenceChangeTrigger() で作成するインストーラブルトリガーとして
+ * 登録すること(GASエディタで直接「onEdit」という名前の関数を作っても、この制限により
+ * ダイアログの部分は動作しない)。
+ *
+ * - 「今月」シートは列見出しが「週次報告記録」側と一致しない(または見出し行の構成が異なる)ため、
+ *   ヘッダー名でのマッチングは行わず、CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERSに設定した
+ *   固定の列位置から直接値を抽出する(readConfidenceEditField_参照)。
+ * - 対象は「見込確度」列(CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERS['見込確度']、既定でO列)の
+ *   単一セル編集のみ。複数セルへの一括貼り付けは、編集前の値(oldValue)を個別に取得できない
+ *   ため対象外とする。
+ * - 変更理由の入力がキャンセル/空欄でも、変更自体は理由なしで記録する(セルの値は
+ *   ユーザーの編集内容のまま変更しない)。
+ * - 記録に失敗しても例外は投げず、ログとアラートに留める(セルの編集自体は既に確定しているため)。
+ */
+function onConfidenceCellEdited(e) {
+  if (!e || !e.range) return;
+
+  const sheet = e.range.getSheet();
+  if (CONFIG.CONFIDENCE_EDIT_SHEET_NAMES.indexOf(sheet.getName()) === -1) return;
+
+  // ペースト等の複数セル編集はoldValueを個別に取得できないため対象外。
+  if (e.range.getNumRows() !== 1 || e.range.getNumColumns() !== 1) return;
+
+  const editedRow = e.range.getRow();
+  if (editedRow === 1) return; // ヘッダー行自体の編集は対象外
+
+  const confidenceCol = columnLetterToIndex_(CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERS['見込確度']);
+  if (e.range.getColumn() !== confidenceCol) return;
+
+  const lastCol = sheet.getLastColumn();
+  if (lastCol === 0) return;
+  // 編集された行の現在値(編集確定後の状態)をまとめて取得し、以降はここから固定列位置で
+  // 直接読み取る(ヘッダー名マッチングには依存しない)。
+  const rowValues = sheet.getRange(editedRow, 1, 1, lastCol).getValues()[0];
+
+  const oldConfidence = e.oldValue !== undefined ? e.oldValue : '';
+  // 変更後の値はe.valueではなく、確定後の状態を反映するrowValues(上で取得済み)から読む方が
+  // 確実(貼り付け以外の一部の編集種別ではe.valueが入らないことがあるため)。
+  const newConfidence = readConfidenceEditField_(rowValues, '見込確度');
+  // 変更前見込確度が空欄(=新規登録による初回設定)の場合は「確度の変更」ではないため対象外とする。
+  if (normalizeHistoryValue_(oldConfidence) === '') return;
+  if (historyValuesEqual_(oldConfidence, newConfidence)) return;
+
+  try {
+    const projectName = String(readConfidenceEditField_(rowValues, '案件名')).trim();
+    const displayName = projectName || ('(' + sheet.getName() + ' ' + editedRow + '行目)');
+
+    const reason = promptForChangeReason_(displayName, oldConfidence, newConfidence);
+    // 案件名セル(「今月」シート側)に既にリッチテキストのリンクが設定されていれば、
+    // そのリンク先URLをそのまま引き継ぐ。リンクが無いセルの場合のみ、従来通り
+    // 「今月」シートの該当行への内部リンクにフォールバックする。
+    const projectNameCol = columnLetterToIndex_(CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERS['案件名']);
+    const projectNameCell = sheet.getRange(editedRow, projectNameCol);
+    const sourceLinkUrl = getCellLinkUrl_(projectNameCell);
+    const reportRowLink = sourceLinkUrl || ('#gid=' + sheet.getSheetId() + '&range=A' + editedRow);
+
+    const fields = {
+      '担当': readConfidenceEditField_(rowValues, '担当'),
+      'カテゴリ': readConfidenceEditField_(rowValues, 'カテゴリ'),
+      '次回アクション予定日時': readConfidenceEditField_(rowValues, '次回アクション予定日時'),
+      'ネクストアクション': readConfidenceEditField_(rowValues, 'ネクストアクション'),
+      '最新見積格納日': readConfidenceEditField_(rowValues, '最新見積格納日'),
+      '契約見込月': readConfidenceEditField_(rowValues, '契約見込月'),
+      '税込想定売上': readConfidenceEditField_(rowValues, '税込想定売上'),
+      '貢献利益率': readConfidenceEditField_(rowValues, '貢献利益率')
+    };
+
+    const change = buildStatusHistoryChange_(
+      fields, displayName, oldConfidence, newConfidence, new Date(), reportRowLink, reason
+    );
+    appendStatusHistoryRows_([change]);
+  } catch (err) {
+    Logger.log(
+      '週次ステータス変更履歴(手動編集分)の記録に失敗しました: ' +
+        sheet.getName() + '!' + e.range.getA1Notation() + ' / ' + err
+    );
+    try {
+      SpreadsheetApp.getUi().alert('見込確度の変更履歴の記録に失敗しました。管理者に連絡してください。\n' + err);
+    } catch (uiErr) {
+      // アラート表示自体に失敗しても、記録失敗の実害はログに残っているため無視する。
+    }
+  }
+}
+
+/**
+ * 見込確度の変更理由をUi.promptで入力させる。キャンセル/未入力の場合、またはダイアログを
+ * 表示できない場合は空文字を返す(変更自体の記録は妨げない)。
+ */
+function promptForChangeReason_(projectName, oldConfidence, newConfidence) {
+  try {
+    const ui = SpreadsheetApp.getUi();
+    const response = ui.prompt(
+      '見込確度の変更理由を入力してください',
+      '案件: ' + projectName + '\n見込確度: ' +
+        formatHistoryValue_(oldConfidence) + ' → ' + formatHistoryValue_(newConfidence),
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (response.getSelectedButton() !== ui.Button.OK) return '';
+    return response.getResponseText().trim();
+  } catch (err) {
+    Logger.log('変更理由の入力ダイアログを表示できませんでした(理由は空欄で記録します): ' + err);
+    return '';
+  }
+}
+
+/**
+ * 「今月」シートの1行分の値(rowValues、A列起点の配列)から、CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERS
+ * に設定された固定列位置を使ってfieldNameに対応する値を読み取る。列位置の設定が無い場合や、
+ * rowValuesの範囲外(シートの右端より右を指している)の場合は空文字を返す。
+ */
+function readConfidenceEditField_(rowValues, fieldName) {
+  const letter = CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERS[fieldName];
+  if (!letter) return '';
+  const col = columnLetterToIndex_(letter);
+  return col <= rowValues.length ? rowValues[col - 1] : '';
+}
+
+/**
+ * セルに設定されているリッチテキストのリンク先URLを取得する。セル全体が単一のリンクとして
+ * 設定されている場合はそのURLを返し、リンクが無い場合(または取得できない場合)は空文字を返す。
+ */
+function getCellLinkUrl_(cell) {
+  try {
+    const richText = cell.getRichTextValue();
+    if (!richText) return '';
+    return richText.getLinkUrl() || '';
+  } catch (err) {
+    return '';
+  }
+}
+
+/**
+ * データ入力規則(プルダウン等のリスト検証)が設定された範囲でも、リスト外の値を含む
+ * 元データの追記が「入力規則違反」で失敗しないようにする。
+ * 対象範囲の入力規則を一時的にクリアしてから値を書き込み、直後に元の規則を復元する。
+ * (Sheetsの入力規則は入力時にのみ検証され、既存セルへ規則を再設定しても遡って
+ * 再検証はされないため、復元後もエラーにはならず、プルダウン自体は維持される)
+ */
+function writeValuesIgnoringValidation_(range, values) {
+  const existingValidations = range.getDataValidations();
+  range.clearDataValidations();
+  try {
+    range.setValues(values);
+  } finally {
+    range.setDataValidations(existingValidations);
+  }
+}
+
+/**
+ * 対象シートのヘッダー行(headerRowNumber省略時は1行目)に、渡された列名のうち
+ * 未登録のものを追加する。ヘッダーが空の場合はdefaultHeader(省略時は「取込日時」「元ファイル名」)
+ * から作成する。タイトル行がヘッダーより上にあるシート(例: 週次ステータス変更履歴)では
+ * headerRowNumberで実際のヘッダー行番号を指定する。
+ * 戻り値: { 列名: 列番号(1始まり) } のマップ
+ */
+function ensureColumnsExist_(targetSheet, headerNames, defaultHeader, headerRowNumber) {
+  const row = headerRowNumber || 1;
+  const lastCol = targetSheet.getLastColumn();
+  const headerRow = lastCol > 0 ? targetSheet.getRange(row, 1, 1, lastCol).getValues()[0] : [];
+  const trimmedHeaderRow = headerRow.map(function (h) { return String(h).trim(); });
+  const hasAnyHeader = trimmedHeaderRow.some(function (h) { return h !== ''; });
+
+  // 列名は実際の列位置を保ったまま保持する(空欄の列があっても詰めない)。
+  // 詰めてしまうと、それより右側の列名と実際の列位置が全てズレてしまう。
+  let columns = hasAnyHeader ? trimmedHeaderRow.slice() : (defaultHeader || ['取込日時', '元ファイル名']).slice();
+  let changed = !hasAnyHeader;
+
   headerNames.forEach(function (name) {
-    if (existing.length >= CONFIG.MAX_DATA_COLUMNS) return;
     const trimmed = String(name).trim();
     if (trimmed === '') return;
-    if (existing.indexOf(trimmed) === -1) {
-      existing.push(trimmed);
+    if (columns.indexOf(trimmed) === -1) {
+      columns.push(trimmed);
       changed = true;
     }
   });
 
   if (changed) {
-    targetSheet.getRange(1, 1, 1, existing.length).setValues([existing]);
+    targetSheet.getRange(row, 1, 1, columns.length).setValues([columns]);
   }
 
   const map = {};
-  existing.forEach(function (name, idx) { map[name] = idx + 1; });
+  columns.forEach(function (name, idx) {
+    if (name !== '') map[name] = idx + 1;
+  });
   return map;
 }
 
 /**
- * ANDPAD側の列名がCONFIG.STAGE_COLUMN_ALIASESに登録された別名(表記ゆれ)と一致する場合、
- * CVR集計用の正規列名(案件種別/属性/アプローチ日/面談日/提案日/契約日)に変換する。
- * 一致しなければ元の列名をそのまま返す。
- */
-function resolveCanonicalHeader_(name) {
-  const aliases = CONFIG.STAGE_COLUMN_ALIASES || {};
-  const trimmed = String(name).trim();
-  const canonicalNames = Object.keys(aliases);
-  for (let i = 0; i < canonicalNames.length; i++) {
-    const canonical = canonicalNames[i];
-    if (aliases[canonical].indexOf(trimmed) !== -1) return canonical;
-  }
-  return trimmed;
-}
-
-/**
- * 案件(引合)名のテキストからCONFIG.CATEGORY_RULESを先頭から順に走査し、
- * 最初にキーワードが一致したカテゴリ名を返す(案件種別の自動判定)。
- * どれにも一致しない場合はCONFIG.CATEGORY_FALLBACK(既定:「その他」)を返す。
- */
-function classifyCategory_(projectName) {
-  const text = String(projectName || '').toUpperCase();
-  const rules = CONFIG.CATEGORY_RULES || [];
-  for (let i = 0; i < rules.length; i++) {
-    const keywords = rules[i].keywords || [];
-    for (let j = 0; j < keywords.length; j++) {
-      if (text.indexOf(String(keywords[j]).toUpperCase()) !== -1) return rules[i].category;
-    }
-  }
-  return CONFIG.CATEGORY_FALLBACK || 'その他';
-}
-
-/**
- * DriveAppとGAS標準サービスだけでExcelファイルを読み取り、
+ * DriveAppとGAS標準サービスだけで週次報告ファイルを読み取り、
  * SpreadsheetApp.getDataRange().getValues()相当の2次元配列を返す。
  * Advanced Drive Service・UrlFetchApp・外部API呼び出しは一切使わない。
  *
- * ANDPAD等の出力は「拡張子は.xlsxだが中身は標準ZIP構造ではない」ケースがあるため、
- * ファイル先頭のマジックバイトで実体を判別し、3通りの読み取り方法にフォールバックする。
+ * ANDPAD等の出力は「拡張子は.xlsxだが中身は標準ZIP構造ではない」「実体はCSV/TSVや
+ * HTMLテーブル」等のケースがあるため、ファイル先頭のマジックバイトや中身のテキストで
+ * 実体を判別し、以下の順にフォールバックする。途中の形式でのパースに失敗しても即エラー
+ * にはせず、ログを残して次の形式を試す。
  *   1. 本物の.xlsx(ZIP構造): Utilities.unzip + XmlServiceで直接パース。
  *   2. 旧形式バイナリ.xls(OLE構造): パース不可のため、その旨を明確なエラーで通知する。
  *   3. HTMLテーブルを.xlsx/.xlsとして出力している場合: <table>をHTMLとして解析する。
+ *   4. CSV/TSVをテキストとして出力している場合: 区切り文字(カンマ/タブ)を自動判定し、
+ *      ダブルクォート囲み・エスケープにも対応した簡易CSVパーサで解析する。
+ * どの形式にも当てはまらない場合は、原因調査用に検出したContentTypeと先頭バイトを
+ * 含むエラーを投げる。
  */
-function readXlsxAsValues_(file) {
+function parseWeeklyReportFile_(file) {
   const blob = file.getBlob();
   const bytes = blob.getBytes();
 
   if (looksLikeZip_(bytes)) {
-    return readValuesFromXlsxZip_(blob);
+    try {
+      return parseXlsxZipDirectly_(blob);
+    } catch (zipErr) {
+      Logger.log(
+        'parseXlsxZipDirectly_ 失敗、HTMLフォールバックを試みます: ' + file.getName() + ' (' + zipErr + ')'
+      );
+    }
   }
 
   if (looksLikeLegacyOle_(bytes)) {
     throw new Error(
-      '旧形式のバイナリExcelファイル(.xls, Excel 97-2003形式)は読み取れません。.xlsx形式で保存し直してください。'
+      '旧形式のバイナリExcelファイル(.xls, Excel 97-2003形式)は読み取れません。' +
+        '.xlsxまたはCSV形式で保存し直してください。(ファイル: ' + file.getName() + ')'
     );
   }
 
   const text = decodeTextBlob_(blob);
+
   if (/<html[\s>]|<table[\s>]/i.test(text.slice(0, 4000))) {
-    return readValuesFromHtmlTable_(text);
+    try {
+      return parseHtmlTableBlob_(text);
+    } catch (htmlErr) {
+      Logger.log(
+        'parseHtmlTableBlob_ 失敗、CSVフォールバックを試みます: ' + file.getName() + ' (' + htmlErr + ')'
+      );
+    }
+  }
+
+  if (looksLikeCsvText_(text)) {
+    return parseCsvBlob_(text);
   }
 
   throw new Error(
-    '対応していないファイル形式です(ZIP/.xlsxでもHTMLでもありません)。ANDPAD側の出力設定やファイルの破損を確認してください。'
+    'サポートされていないファイル形式です(ZIP/.xlsx・HTML・CSVのいずれでもありません)。' +
+      'ファイル: ' + file.getName() +
+      ' / ContentType: ' + blob.getContentType() +
+      ' / 先頭バイト: ' + bytesToHexPreview_(bytes)
   );
 }
 
@@ -404,23 +822,49 @@ function looksLikeLegacyOle_(bytes) {
 }
 
 /**
+ * テキストの先頭数行にカンマまたはタブが含まれるかどうかで、CSV/TSVらしさを判定する。
+ * (HTML判定・ZIP判定・OLE判定のいずれにも当てはまらなかった場合の最終フォールバックとして使う)
+ */
+function looksLikeCsvText_(text) {
+  const lines = text.split(/\r\n|\r|\n/).slice(0, 5).filter(function (line) {
+    return line.trim() !== '';
+  });
+  if (lines.length === 0) return false;
+  return lines.some(function (line) {
+    return line.indexOf(',') !== -1 || line.indexOf('\t') !== -1;
+  });
+}
+
+/**
+ * バイト列先頭16バイトを16進数プレビュー文字列にする(未対応形式のエラー診断用)。
+ */
+function bytesToHexPreview_(bytes) {
+  return bytes.slice(0, 16).map(function (b) {
+    const unsigned = b < 0 ? b + 256 : b;
+    const hex = unsigned.toString(16).toUpperCase();
+    return hex.length === 1 ? '0' + hex : hex;
+  }).join(' ');
+}
+
+/**
  * blobのテキストをUTF-8で読み、内部にShift_JIS系のcharset宣言が見つかればShift_JISで読み直す。
- * (ANDPAD等、日本語業務システムのHTML書き出しはShift_JISであることが多いため)
+ * (ANDPAD等、日本語業務システムのHTML/CSV書き出しはShift_JISであることが多いため)
+ * 先頭のUTF-8 BOMが付いている場合は取り除く。
  */
 function decodeTextBlob_(blob) {
   const utf8Text = blob.getDataAsString('UTF-8');
   const metaMatch = utf8Text.slice(0, 2000).match(/charset\s*=\s*["']?([\w-]+)/i);
   const charset = metaMatch ? metaMatch[1].toLowerCase() : '';
-  if (/shift[-_]?jis|sjis|ms932|windows-31j/.test(charset)) {
-    return blob.getDataAsString('Shift_JIS');
-  }
-  return utf8Text;
+  const text = /shift[-_]?jis|sjis|ms932|windows-31j/.test(charset)
+    ? blob.getDataAsString('Shift_JIS')
+    : utf8Text;
+  return text.replace(/^\uFEFF/, '');
 }
 
 /**
  * 本物の.xlsx(ZIP構造)をUtilities.unzip + XmlServiceで直接パースする。
  */
-function readValuesFromXlsxZip_(blob) {
+function parseXlsxZipDirectly_(blob) {
   const zipBlob = blob.setContentType('application/zip');
   let entries;
   try {
@@ -448,35 +892,39 @@ function readValuesFromXlsxZip_(blob) {
 
 /**
  * ANDPAD等が「Excelファイル」と称して実際にはHTMLテーブルを出力しているケース向けの
- * フォールバック。以下の手順で、実際にデータが入っているテーブルを取りこぼしなく抽出する。
- *   1. splitTopLevelTables_で最上位の<table>ブロックを入れ子を壊さずに分割する。
- *      単純な非貪欲正規表現(<table[\s\S]*?<\/table>)は、テーブルが入れ子になっている場合
- *      (レイアウト用の外側<table>の中に実データの<table>がある等)、内側の</table>で
- *      打ち切られてしまい、実データを含む外側テーブルを正しく取得できないことがある。
- *   2. 各ブロックについて実際に行・セルを抽出し、<tr>タグの出現数ではなく「値が入っている
- *      行数」で比較して最もデータらしいブロックを選ぶ。タグの出現数だけで比較すると、
- *      見た目のレイアウト目的の(値の少ない)テーブルの方が<tr>数が多く、誤って選ばれることがある。
+ * フォールバック。複数の<table>がある場合は行数が最も多いものをデータ本体とみなす。
  * XmlServiceでの厳密なXMLパースはHTMLの崩れ(閉じタグ漏れ等)で失敗しやすいため、
  * 正規表現ベースの緩いパースで抽出する。
+ * <tr>を1件も抽出できなかった場合はエラーを投げ、呼び出し元でCSVフォールバックに
+ * つなげられるようにする。
  */
-function readValuesFromHtmlTable_(html) {
-  const tableBlocks = splitTopLevelTables_(html);
-  if (tableBlocks.length === 0) return [];
-
-  let bestRows = null;
-  let bestScore = -1;
+function parseHtmlTableBlob_(html) {
+  const tableBlocks = html.match(/<table[\s\S]*?<\/table>/gi) || [html];
+  let bestBlock = tableBlocks[0];
+  let bestRowCount = -1;
   tableBlocks.forEach(function (block) {
-    const rows = extractRowsFromTableHtml_(block);
-    const populatedRowCount = rows.filter(function (row) {
-      return row.some(function (cell) { return cell !== ''; });
-    }).length;
-    if (populatedRowCount > bestScore) {
-      bestScore = populatedRowCount;
-      bestRows = rows;
+    const rowCount = (block.match(/<tr[\s>]/gi) || []).length;
+    if (rowCount > bestRowCount) {
+      bestRowCount = rowCount;
+      bestBlock = block;
     }
   });
 
-  const rows = bestRows || [];
+  const rowMatches = bestBlock.match(/<tr[\s\S]*?<\/tr>/gi) || [];
+  if (rowMatches.length === 0) {
+    throw new Error('HTMLとして解析できる<table>/<tr>が見つかりませんでした。');
+  }
+
+  const rows = rowMatches.map(function (rowHtml) {
+    const cellMatches = rowHtml.match(/<t[dh][\s\S]*?<\/t[dh]>/gi) || [];
+    return cellMatches.map(function (cellHtml) {
+      const inner = cellHtml.replace(/^<t[dh][^>]*>/i, '').replace(/<\/t[dh]>$/i, '');
+      const withBreaks = inner.replace(/<br\s*\/?>/gi, '\n');
+      const stripped = withBreaks.replace(/<[^>]+>/g, '');
+      return decodeHtmlEntities_(stripped).trim();
+    });
+  });
+
   const maxCol = rows.reduce(function (max, r) { return Math.max(max, r.length); }, 0);
   return rows.map(function (row) {
     const padded = row.slice();
@@ -486,56 +934,90 @@ function readValuesFromHtmlTable_(html) {
 }
 
 /**
- * htmlのうち最上位(トップレベル)の<table>...</table>ブロックを、開閉タグの深さを数えながら
- * 分割する。<table>が入れ子になっている場合でも、外側の開始タグから対応する外側の終了タグ
- * までを1ブロックとして正しく切り出す(非貪欲な正規表現では内側の</table>で打ち切られてしまう)。
+ * CSV/TSVテキストを2次元配列にパースする。区切り文字は先頭行のカンマ/タブの出現数で
+ * 自動判定する。ダブルクォート囲み・囲み内のカンマ/改行・""によるエスケープに対応した
+ * 簡易パーサ(RFC4180相当)。
  */
-function splitTopLevelTables_(html) {
-  const tagRe = /<table\b[^>]*>|<\/table\s*>/gi;
-  const blocks = [];
-  let depth = 0;
-  let start = -1;
-  let match;
-  while ((match = tagRe.exec(html)) !== null) {
-    const isCloseTag = match[0].charAt(1) === '/';
-    if (!isCloseTag) {
-      if (depth === 0) start = match.index;
-      depth++;
-    } else if (depth > 0) {
-      depth--;
-      if (depth === 0 && start !== -1) {
-        blocks.push(html.slice(start, match.index + match[0].length));
-        start = -1;
-      }
-    }
-  }
-  return blocks;
+function parseCsvBlob_(text) {
+  const delimiter = detectCsvDelimiter_(text);
+  return parseDelimitedText_(text, delimiter);
 }
 
 /**
- * 1つの<table>ブロック(内部に入れ子テーブルを含んでもよい)から<tr>単位で行・セルを抽出する。
- * colspan指定があるセルは、その回数だけ同じ値を繰り返して列位置のズレを抑える
- * (rowspanは複雑になるため非対応。ANDPAD側の一覧データ出力では通常使われない)。
+ * テキスト先頭行のカンマ数とタブ数を比較し、区切り文字を推定する。
  */
-function extractRowsFromTableHtml_(tableHtml) {
-  const rowMatches = tableHtml.match(/<tr[\s\S]*?<\/tr>/gi) || [];
-  return rowMatches.map(function (rowHtml) {
-    const cellMatches = rowHtml.match(/<t[dh][\s\S]*?<\/t[dh]>/gi) || [];
-    const cells = [];
-    cellMatches.forEach(function (cellHtml) {
-      const openTagMatch = cellHtml.match(/^<t[dh][^>]*>/i);
-      const openTag = openTagMatch ? openTagMatch[0] : '';
-      const colspanMatch = openTag.match(/colspan\s*=\s*["']?(\d+)/i);
-      const colspan = colspanMatch ? Math.max(1, parseInt(colspanMatch[1], 10)) : 1;
+function detectCsvDelimiter_(text) {
+  const firstLine = text.split(/\r\n|\r|\n/)[0] || '';
+  const commaCount = (firstLine.match(/,/g) || []).length;
+  const tabCount = (firstLine.match(/\t/g) || []).length;
+  return tabCount > commaCount ? '\t' : ',';
+}
 
-      const inner = cellHtml.replace(/^<t[dh][^>]*>/i, '').replace(/<\/t[dh]>$/i, '');
-      const withBreaks = inner.replace(/<br\s*\/?>/gi, '\n');
-      const stripped = withBreaks.replace(/<[^>]+>/g, '');
-      const value = decodeHtmlEntities_(stripped).trim();
+/**
+ * 指定した区切り文字でテキストを2次元配列にパースする(ダブルクォート対応)。
+ * 各行の列数は最大列数に合わせて空文字でパディングする。
+ */
+function parseDelimitedText_(text, delimiter) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+  let i = 0;
+  const len = text.length;
 
-      for (let i = 0; i < colspan; i++) cells.push(value);
-    });
-    return cells;
+  while (i < len) {
+    const ch = text.charAt(i);
+
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text.charAt(i + 1) === '"') {
+          field += '"';
+          i += 2;
+        } else {
+          inQuotes = false;
+          i++;
+        }
+      } else {
+        field += ch;
+        i++;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inQuotes = true;
+      i++;
+    } else if (ch === delimiter) {
+      row.push(field);
+      field = '';
+      i++;
+    } else if (ch === '\r' || ch === '\n') {
+      if (ch === '\r' && text.charAt(i + 1) === '\n') i++;
+      row.push(field);
+      field = '';
+      rows.push(row);
+      row = [];
+      i++;
+    } else {
+      field += ch;
+      i++;
+    }
+  }
+
+  if (field !== '' || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+
+  while (rows.length > 0 && rows[rows.length - 1].every(function (cell) { return cell === ''; })) {
+    rows.pop();
+  }
+
+  const maxCol = rows.reduce(function (max, r) { return Math.max(max, r.length); }, 0);
+  return rows.map(function (row) {
+    const padded = row.slice();
+    while (padded.length < maxCol) padded.push('');
+    return padded;
   });
 }
 
@@ -713,12 +1195,14 @@ function isSupportedSpreadsheet_(file) {
   if (
     mimeType === MimeType.GOOGLE_SHEETS ||
     mimeType === MimeType.MICROSOFT_EXCEL ||
-    mimeType === 'application/vnd.ms-excel'
+    mimeType === 'application/vnd.ms-excel' ||
+    mimeType === MimeType.CSV ||
+    mimeType === 'text/csv'
   ) {
     return true;
   }
   const name = file.getName().toLowerCase();
-  return name.endsWith('.xlsx') || name.endsWith('.xls');
+  return name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv') || name.endsWith('.tsv');
 }
 
 /**
@@ -762,344 +1246,16 @@ function getOrCreateSubFolder_(parentFolder, name) {
   return parentFolder.createFolder(name);
 }
 
-/**
- * このスクリプトがバインドされているスプレッドシートを返す。
- *
- * 【重要】SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID) をonEdit(e)経由の呼び出し
- * (getTargetSheet_ / getStatusHistorySheet_ / findMonthlySheet_)で使わないこと。
- * onEdit(e)はシンプルトリガーとして実行され認可(authorization)が一切ない状態で動くため、
- * 対象が同じファイルであってもID指定でスプレッドシートを開く操作は例外になる。その例外は
- * onEdit側でLogger.logされるだけで画面上には何も表示されず、「今月」シートのO列(見込確度)を
- * 編集しても報告記録・週次ステータス変更履歴への追記や案件名リンクのコピーが一切発生しない、
- * という不具合の原因になっていた。getActiveSpreadsheet()はコンテナバインド型スクリプトで
- * あれば認可不要で使え、時間主導型トリガー・シンプルトリガーいずれの実行コンテキストでも
- * バインド先のファイルを返すため、こちらを使う。
- */
-function getBoundSpreadsheet_() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  if (ss.getId() !== CONFIG.TARGET_SPREADSHEET_ID) {
-    throw new Error(
-      'このスクリプトは想定外のスプレッドシート(id: ' + ss.getId() + ')にバインドされています。' +
-        '「31期予材リスト」(id: ' + CONFIG.TARGET_SPREADSHEET_ID + ')に紐づいたコンテナバインド型' +
-        'プロジェクトとして設置してください。'
-    );
-  }
-  return ss;
-}
-
 function getTargetSheet_() {
-  const ss = getBoundSpreadsheet_();
+  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
   let sheet = ss.getSheetByName(CONFIG.TARGET_SHEET_NAME);
   if (!sheet) {
     sheet = ss.insertSheet(CONFIG.TARGET_SHEET_NAME);
   }
   if (sheet.getLastRow() === 0) {
-    // 新規シート作成時はCVR集計列まで含めて初期ヘッダーを作る
-    // (取込日時, 元ファイル名, 案件種別, 属性, アプローチ日, 面談日, 提案日, 契約日)。
-    // 既存シートの場合はここを通らず、ensureColumnsExist_ が不足列を末尾に自動追加する。
-    const defaultHeader = ['取込日時', '元ファイル名'].concat(Object.keys(CONFIG.STAGE_COLUMN_ALIASES || {}));
-    sheet.getRange(1, 1, 1, defaultHeader.length).setValues([defaultHeader]);
+    sheet.getRange(1, 1, 1, 2).setValues([['取込日時', '元ファイル名']]);
   }
   return sheet;
-}
-
-// ===== 編集時トリガー (onEdit) =====
-
-/**
- * シンプルトリガー。関数名onEditはGASにおいて特別な意味を持ち、インストール操作なしで
- * このスプレッドシートが編集されるたびに自動実行される(手動実行や権限承認は不要)。
- * 動作するのは、このスクリプトが「31期予材リスト」スプレッドシートの
- * コンテナバインド型スクリプトとして設置されている場合のみ(スタンドアロン型では発火しない)。
- * より強い権限(メール送信等)が必要な場合は installEditTrigger() でインストーラブル
- * トリガーとして handleEdit_ を登録することもできる。
- */
-function onEdit(e) {
-  try {
-    handleEdit_(e);
-  } catch (err) {
-    Logger.log('onEdit処理でエラーが発生しました: ' + err);
-    notifyEditError_(err);
-  }
-}
-
-/**
- * onEdit中の例外はGASのUIダイアログ(getUi().alert等)を出せないため、代わりにtoastで
- * スプレッドシート右下にエラーを表示する。Logger.logだけに埋もれて気づけなくなる
- * (「編集しても何も起きないように見える」)事態を防ぐ。
- */
-function notifyEditError_(err) {
-  try {
-    SpreadsheetApp.getActiveSpreadsheet().toast(String(err), '編集時処理でエラーが発生しました', 10);
-  } catch (toastErr) {
-    Logger.log('エラー通知(toast)にも失敗しました: ' + toastErr);
-  }
-}
-
-/**
- * シート名に「今月」を含むシートの、EDIT_MIN_ROW行目以降・EDIT_TARGET_COLUMN列目
- * (既定: O列=見込確度)の変更を検知し、「報告記録」と「週次ステータス変更履歴」の
- * 両方へ自動転記する。範囲コピー&ペーストなど複数セル一括編集にも対応する。
- * また、「週次ステータス変更履歴」のSTATUS_HISTORY_PROJECT_COLUMN(既定: C列)が手動で
- * 編集された場合は、対応するハイパーリンクの自動セットのみを行う(handleStatusHistoryProjectEdit_)。
- */
-function handleEdit_(e) {
-  if (!e || !e.range) return;
-
-  const sheet = e.range.getSheet();
-  const sheetName = sheet.getName();
-
-  if (sheetName === CONFIG.STATUS_HISTORY_SHEET_NAME) {
-    handleStatusHistoryProjectEdit_(e, sheet);
-    return;
-  }
-
-  if (sheetName.indexOf(CONFIG.EDIT_SHEET_NAME_KEYWORD) === -1) return;
-
-  const range = e.range;
-  const firstRow = range.getRow();
-  const lastRow = firstRow + range.getNumRows() - 1;
-  const firstCol = range.getColumn();
-  const lastCol = firstCol + range.getNumColumns() - 1;
-
-  if (lastRow < CONFIG.EDIT_MIN_ROW) return;
-  if (CONFIG.EDIT_TARGET_COLUMN < firstCol || CONFIG.EDIT_TARGET_COLUMN > lastCol) return;
-
-  const isSingleCell = range.getNumRows() === 1 && range.getNumColumns() === 1;
-  const startRow = Math.max(firstRow, CONFIG.EDIT_MIN_ROW);
-  let endRow = lastRow;
-  if (endRow - startRow + 1 > CONFIG.EDIT_MAX_ROWS_PER_EVENT) {
-    endRow = startRow + CONFIG.EDIT_MAX_ROWS_PER_EVENT - 1;
-    Logger.log('編集行数が多いため、先頭' + CONFIG.EDIT_MAX_ROWS_PER_EVENT + '行のみ処理します。');
-  }
-
-  const editorEmail = getEditorEmail_(e);
-  const weeklySheet = getTargetSheet_();
-  const historySheet = getStatusHistorySheet_();
-
-  for (let row = startRow; row <= endRow; row++) {
-    const newValue = sheet.getRange(row, CONFIG.EDIT_TARGET_COLUMN).getValue();
-    const oldValue = isSingleCell ? e.oldValue : '';
-    if (isSingleCell && String(oldValue === undefined ? '' : oldValue) === String(newValue)) continue;
-
-    appendEditToWeeklyReport_(sheet, row, weeklySheet);
-    appendStatusHistory_(sheet, row, oldValue, newValue, editorEmail, historySheet);
-  }
-}
-
-/**
- * 編集したユーザーのメールアドレスを可能な範囲で取得する。
- * 権限設定によっては取得できないことがあるため、その場合は空文字を返す。
- */
-function getEditorEmail_(e) {
-  try {
-    if (e.user && e.user.getEmail && e.user.getEmail()) return e.user.getEmail();
-  } catch (err) {
-    // メールアドレス取得不可(権限設定による)。空文字で続行する。
-  }
-  try {
-    return Session.getActiveUser().getEmail() || '';
-  } catch (err) {
-    return '';
-  }
-}
-
-/**
- * 「今月」シートの1行分を、列名マッチングで「報告記録」シートへ追記する。
- * ヘッダー行位置(CONFIG.EDIT_HEADER_ROW)は「今月」シートの実際のレイアウトに合わせて
- * 調整すること(既定値: 4行目)。
- */
-function appendEditToWeeklyReport_(sourceSheet, row, targetSheet) {
-  const lastCol = sourceSheet.getLastColumn();
-  const headerRow = sourceSheet.getRange(CONFIG.EDIT_HEADER_ROW, 1, 1, lastCol).getValues()[0];
-  const sourceHeader = headerRow.map(function (h) { return String(h).trim(); });
-  const rowValues = sourceSheet.getRange(row, 1, 1, lastCol).getValues()[0];
-
-  const headerMap = ensureColumnsExist_(targetSheet, sourceHeader);
-  const totalCols = Math.min(targetSheet.getLastColumn(), CONFIG.MAX_DATA_COLUMNS);
-  const timestamp = new Date();
-
-  const outRow = new Array(totalCols).fill('');
-  outRow[headerMap['取込日時'] - 1] = timestamp;
-  outRow[headerMap['元ファイル名'] - 1] = '(シート編集) ' + sourceSheet.getName();
-  sourceHeader.forEach(function (colName, idx) {
-    if (!colName) return;
-    const col = headerMap[colName];
-    if (col && col <= totalCols) outRow[col - 1] = rowValues[idx];
-  });
-
-  const lastRow = targetSheet.getLastRow();
-  targetSheet.getRange(lastRow + 1, 1, 1, totalCols).setValues([outRow]);
-}
-
-/**
- * 「週次ステータス変更履歴」シートを取得する。存在しない場合は作成し、ヘッダーを設定する。
- */
-function getStatusHistorySheet_() {
-  const ss = getBoundSpreadsheet_();
-  let sheet = ss.getSheetByName(CONFIG.STATUS_HISTORY_SHEET_NAME);
-  if (!sheet) {
-    sheet = ss.insertSheet(CONFIG.STATUS_HISTORY_SHEET_NAME);
-  }
-  if (sheet.getLastRow() === 0) {
-    sheet.getRange(1, 1, 1, 8).setValues([[
-      '変更日時', 'シート名', '案件名', '列名', '変更前', '変更後', '編集者', '識別情報'
-    ]]);
-  }
-  return sheet;
-}
-
-/**
- * 見込確度などの変更を「週次ステータス変更履歴」に1行追記する。
- * 識別情報には、対象行の1列目からEDIT_IDENTIFIER_COLUMN_COUNT列目までの値のうち
- * 空でないものだけを" / "区切りで連結して記録する(案件名・得意先名などを想定)。
- * 追記後、STATUS_HISTORY_PROJECT_COLUMN(既定: C列)には「今月」タブのEDIT_URL_COLUMN
- * (既定: H列、案件名テキスト+ハイパーリンク)をそのままコピーする。
- */
-function appendStatusHistory_(sourceSheet, row, oldValue, newValue, editorEmail, historySheet) {
-  const idCount = Math.min(CONFIG.EDIT_IDENTIFIER_COLUMN_COUNT, CONFIG.EDIT_TARGET_COLUMN - 1);
-  const idValues = idCount > 0 ? sourceSheet.getRange(row, 1, 1, idCount).getValues()[0] : [];
-  const identifier = idValues
-    .map(function (v) { return String(v).trim(); })
-    .filter(function (v) { return v !== ''; })
-    .join(' / ');
-
-  const columnName = getColumnHeaderName_(sourceSheet, CONFIG.EDIT_TARGET_COLUMN);
-
-  historySheet.appendRow([
-    new Date(),
-    sourceSheet.getName(),
-    '',
-    columnName,
-    oldValue,
-    newValue,
-    editorEmail,
-    identifier
-  ]);
-
-  copyProjectHyperlink_(sourceSheet, row, historySheet, historySheet.getLastRow());
-}
-
-/**
- * 指定列のヘッダー名(EDIT_HEADER_ROW行目)を取得する。取得できない場合は「列N」を返す。
- */
-function getColumnHeaderName_(sheet, col) {
-  try {
-    const value = sheet.getRange(CONFIG.EDIT_HEADER_ROW, col).getValue();
-    const name = String(value).trim();
-    return name !== '' ? name : ('列' + col);
-  } catch (err) {
-    return '列' + col;
-  }
-}
-
-/**
- * sourceSheetのEDIT_URL_COLUMN(既定: H列、案件名テキスト+ハイパーリンク)のリッチテキストを、
- * historySheetのSTATUS_HISTORY_PROJECT_COLUMN(既定: C列)へそのままコピーする。
- * 表示文字列とリンクURLをまとめて複製するため、案件名の表示とリンク先が常に一致する。
- */
-function copyProjectHyperlink_(sourceSheet, sourceRow, historySheet, historyRow) {
-  const richText = sourceSheet.getRange(sourceRow, CONFIG.EDIT_URL_COLUMN).getRichTextValue();
-  if (!richText) return; // セルが空、または文字列以外の場合はnullになるためコピーしない
-  historySheet.getRange(historyRow, CONFIG.STATUS_HISTORY_PROJECT_COLUMN).setRichTextValue(richText);
-}
-
-/**
- * 「週次ステータス変更履歴」のSTATUS_HISTORY_PROJECT_COLUMN(既定: C列)が手動で入力・更新
- * された際、EDIT_SHEET_NAME_KEYWORD(既定:「今月」)を含むシートのEDIT_URL_COLUMN(既定: H列)
- * と案件名テキストが完全一致する行を探し、そのハイパーリンクを自動でセットする。
- */
-function handleStatusHistoryProjectEdit_(e, sheet) {
-  const range = e.range;
-  const firstRow = range.getRow();
-  const lastRow = firstRow + range.getNumRows() - 1;
-  const firstCol = range.getColumn();
-  const lastCol = firstCol + range.getNumColumns() - 1;
-  const col = CONFIG.STATUS_HISTORY_PROJECT_COLUMN;
-
-  if (col < firstCol || col > lastCol) return;
-  if (lastRow < 2) return;
-
-  const monthlySheet = findMonthlySheet_();
-  if (!monthlySheet) return;
-  const urlMap = buildProjectUrlMap_(monthlySheet);
-
-  const startRow = Math.max(firstRow, 2);
-  const endRow = Math.min(lastRow, startRow + CONFIG.EDIT_MAX_ROWS_PER_EVENT - 1);
-  for (let row = startRow; row <= endRow; row++) {
-    const cell = sheet.getRange(row, col);
-    const text = String(cell.getValue()).trim();
-    const richText = urlMap[text];
-    if (richText) cell.setRichTextValue(richText);
-  }
-}
-
-/**
- * 「週次ステータス変更履歴」のSTATUS_HISTORY_PROJECT_COLUMN(既定: C列)のうち、まだ
- * ハイパーリンクが設定されていないセルへ一括でリンクを設定する。EDIT_SHEET_NAME_KEYWORD
- * (既定:「今月」)を含むシートのEDIT_URL_COLUMN(既定: H列)の案件名テキストと完全一致する
- * 行を探し、そのリッチテキスト(表示文字列+リンクURL)をそのままコピーする。GASエディタから
- * 手動で実行する(既にリンク済みのセルはスキップするため、何度でも再実行できる)。
- */
-function applyProjectLinksToStatusHistory() {
-  const historySheet = getStatusHistorySheet_();
-  const monthlySheet = findMonthlySheet_();
-  if (!monthlySheet) {
-    Logger.log('「' + CONFIG.EDIT_SHEET_NAME_KEYWORD + '」を含むシートが見つかりませんでした。');
-    return;
-  }
-
-  const urlMap = buildProjectUrlMap_(monthlySheet);
-  const lastRow = historySheet.getLastRow();
-  if (lastRow < 2) return;
-
-  const col = CONFIG.STATUS_HISTORY_PROJECT_COLUMN;
-  let updatedCount = 0;
-  for (let row = 2; row <= lastRow; row++) {
-    const cell = historySheet.getRange(row, col);
-    const richText = cell.getRichTextValue();
-    if (richText && richText.getLinkUrl()) continue; // 既にリンク済み
-
-    const text = (richText ? richText.getText() : String(cell.getValue())).trim();
-    const match = urlMap[text];
-    if (!match) continue;
-
-    cell.setRichTextValue(match);
-    updatedCount++;
-  }
-  Logger.log(updatedCount + '件のセルへハイパーリンクを設定しました。');
-}
-
-/**
- * EDIT_SHEET_NAME_KEYWORD(既定:「今月」)を含む最初のシートを返す。見つからない場合はnull。
- */
-function findMonthlySheet_() {
-  const ss = getBoundSpreadsheet_();
-  const sheets = ss.getSheets();
-  for (let i = 0; i < sheets.length; i++) {
-    if (sheets[i].getName().indexOf(CONFIG.EDIT_SHEET_NAME_KEYWORD) !== -1) return sheets[i];
-  }
-  return null;
-}
-
-/**
- * monthlySheetのEDIT_URL_COLUMN(既定: H列)から、{ 案件名テキスト: RichTextValue } の
- * マップを作る。案件名が重複する場合は最後に見つかった行の値を採用する。
- */
-function buildProjectUrlMap_(monthlySheet) {
-  const map = {};
-  const lastRow = monthlySheet.getLastRow();
-  if (lastRow < CONFIG.EDIT_MIN_ROW) return map;
-
-  const range = monthlySheet.getRange(
-    CONFIG.EDIT_MIN_ROW, CONFIG.EDIT_URL_COLUMN, lastRow - CONFIG.EDIT_MIN_ROW + 1, 1
-  );
-  range.getRichTextValues().forEach(function (cellArr) {
-    const richText = cellArr[0];
-    if (!richText) return;
-    const text = richText.getText().trim();
-    if (text !== '') map[text] = richText;
-  });
-  return map;
 }
 
 // ===== トリガー設定 =====
@@ -1108,8 +1264,6 @@ function buildProjectUrlMap_(monthlySheet) {
  * 週次トリガーをスクリプトから設定したい場合に一度だけ実行する。
  * (GASエディタの「トリガー」画面から手動設定する場合はこの関数は不要)
  * 既存の syncWeeklyReports 用トリガーがあれば一旦削除してから作り直す。
- * 毎週月曜日の午前6時〜7時の間に実行される（GASの時間主導型トリガーは実行時刻の厳密な
- * 指定ができないため、atHour(6)で「6時〜7時の間のいずれかのタイミング」を指定する）。
  */
 function installWeeklyTrigger() {
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
@@ -1126,20 +1280,23 @@ function installWeeklyTrigger() {
 }
 
 /**
- * onEdit(e)のシンプルトリガーではなく、handleEdit_をインストーラブルトリガーとして
- * 登録したい場合に一度だけ実行する(任意)。インストーラブルトリガーは追加の権限承認が
- * 必要になる代わりに、MailApp等の外部サービス呼び出しも可能になる。
- * 既存の handleEdit_ 用トリガーがあれば一旦削除してから作り直す。
+ * 「今月」等の予材シートで見込確度が手動編集された際に、変更理由の入力ダイアログ
+ * (onConfidenceCellEdited)を実行するインストーラブルトリガーを設定する。一度だけ実行する。
+ * (GASエディタの「トリガー」画面から手動設定する場合はこの関数は不要。ただしその場合も
+ * 必ず「インストーラブル トリガー」として、イベントの種類を「編集時」で設定すること。
+ * 単純トリガーのonEdit(e)ではダイアログが表示できないため、この機能には使えない。)
+ * 既存の onConfidenceCellEdited 用トリガーがあれば一旦削除してから作り直す。
  */
-function installEditTrigger() {
+function installConfidenceChangeTrigger() {
+  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
-    if (trigger.getHandlerFunction() === 'handleEdit_') {
+    if (trigger.getHandlerFunction() === 'onConfidenceCellEdited') {
       ScriptApp.deleteTrigger(trigger);
     }
   });
 
-  ScriptApp.newTrigger('handleEdit_')
-    .forSpreadsheet(SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID))
+  ScriptApp.newTrigger('onConfidenceCellEdited')
+    .forSpreadsheet(ss)
     .onEdit()
     .create();
 }
