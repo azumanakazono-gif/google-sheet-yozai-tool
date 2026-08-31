@@ -1,6 +1,6 @@
 /**
  * 週次: SOURCE_FOLDER_ID 配下に置かれたANDPAD出力の.xlsx（Googleスプレッドシートも可）を読み取り、
- * 「31期予材リスト」の「週次報告記録」シート末尾に追記する。
+ * 「31期予材リスト」の「報告記録」シート末尾に追記する。
  *
  * - Excelファイルは DriveApp + Utilities.unzip + XmlService のみで直接パースする（Advanced Drive
  *   Service、UrlFetchApp、外部API呼び出しは一切使わない）。ANDPAD等の「拡張子は.xlsxだが中身は
@@ -148,12 +148,12 @@ function appendFileToTargetSheet_(file, targetSheet) {
 }
 
 /**
- * 「週次報告記録」への直近の追記分(newRows)を、追記前の既存データ(previousRows)と
+ * 「報告記録」への直近の追記分(newRows)を、追記前の既存データ(previousRows)と
  * 案件単位で突き合わせ、「見込確度」(CONFIG.STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES)が
  * 変更前後で変化した案件だけを抽出して「週次ステータス変更履歴」シートの末尾に記録する。
  * (ステータスや進捗など見込確度以外の変更は転記対象にしない)
- * 案件を識別するキー列や見込確度列が「週次報告記録」に存在しない場合は、何もせずスキップする。
- * reportSheet・reportLastRow(追記前の最終行)は、履歴側の案件名セルに「週次報告記録」の
+ * 案件を識別するキー列や見込確度列が「報告記録」に存在しない場合は、何もせずスキップする。
+ * reportSheet・reportLastRow(追記前の最終行)は、履歴側の案件名セルに「報告記録」の
  * 該当行へ飛べるリンクを張るために使う(リンク自体の見た目はbuildStatusHistoryChange_を参照)。
  */
 function updateWeeklyStatusHistory_(reportSheet, reportLastRow, headerMap, previousRows, newRows, timestamp) {
@@ -245,7 +245,7 @@ function buildStatusHistoryChange_(fields, projectName, oldConfidence, newConfid
 }
 
 /**
- * 「週次報告記録」側の候補列名リストから最初に見つかった列の値を読み取る。
+ * 「報告記録」側の候補列名リストから最初に見つかった列の値を読み取る。
  * どれも見つからない場合は空文字を返す。
  */
 function readTrackedField_(headerMap, row, candidateNames) {
@@ -347,7 +347,7 @@ function findLastRowWithValueInColumn_(sheet, col, startRow) {
 
 /**
  * 案件名列に、既存シートの見た目(リンク青色 + 下線)に合わせたリッチテキストを設定する。
- * リンク先はchange['__案件名リンクURL']に組み立て済みの「週次報告記録」該当行への
+ * リンク先はchange['__案件名リンクURL']に組み立て済みの「報告記録」該当行への
  * 内部リンクで、リンクが無い場合(reportSheetの行が特定できなかった場合)でも
  * 色・下線のスタイルだけは既存の見た目に合わせて適用する。
  */
@@ -453,7 +453,7 @@ function getOrCreateStatusHistorySheet_() {
  * 登録すること(GASエディタで直接「onEdit」という名前の関数を作っても、この制限により
  * ダイアログの部分は動作しない)。
  *
- * - 「今月」シートは列見出しが「週次報告記録」側と一致しない(または見出し行の構成が異なる)ため、
+ * - 「今月」シートは列見出しが「報告記録」側と一致しない(または見出し行の構成が異なる)ため、
  *   ヘッダー名でのマッチングは行わず、CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERSに設定した
  *   固定の列位置から直接値を抽出する(readConfidenceEditField_参照)。
  * - 対象は「見込確度」列(CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERS['見込確度']、既定でO列)の

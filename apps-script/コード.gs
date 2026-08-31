@@ -2,7 +2,7 @@
  * 予材リスト週次同期スクリプト（単一ファイル版）
  *
  * - SOURCE_FOLDER_ID 配下のANDPAD出力Excelファイル（Googleスプレッドシートも可）を読み取り、
- *   「31期予材リスト」の「週次報告記録」シート末尾に追記する。
+ *   「31期予材リスト」の「報告記録」シート末尾に追記する。
  * - Excelファイルは DriveApp + Utilities.unzip + XmlService のみで直接パースする（Advanced Drive
  *   Service、UrlFetchApp、外部API呼び出しは一切使わない）。ANDPAD等の「拡張子は.xlsxだが中身は
  *   標準ZIPではない(HTMLテーブルやCSV/TSV等)」出力にも対応するため、先頭バイトや中身のテキストで
@@ -32,7 +32,7 @@ const CONFIG = {
   TARGET_SPREADSHEET_ID: '1zTz2lLUD6M4SPBCcEO3OBxNMmv1U7RsUYRJhkKkgOOQ',
   TARGET_SHEET_NAME: '報告記録',
 
-  // 週次ステータス変更履歴: 「週次報告記録」への追記直後に、直近の取り込み分から
+  // 週次ステータス変更履歴: 「報告記録」への追記直後に、直近の取り込み分から
   // 「見込確度」が変更前後で変化した案件だけを抽出して記録するシート名。
   STATUS_HISTORY_SHEET_NAME: '週次ステータス変更履歴',
   // 履歴シートの実際のレイアウト: 1行目=タイトル行、2行目=列見出し行、3行目以降=データ行。
@@ -59,14 +59,14 @@ const CONFIG = {
   STATUS_HISTORY_RANK_FLAG_COLUMN: '昇降フラグ',
   // 案件名列(既存シートの見た目に合わせたリンク色)。既定はGoogle Sheetsのリンク標準色。
   STATUS_HISTORY_LINK_COLOR: '#1155cc',
-  // 「週次報告記録」内で案件を一意に識別するための列名候補(先頭から順に探し、
+  // 「報告記録」内で案件を一意に識別するための列名候補(先頭から順に探し、
   // 最初に見つかった列をキーとして使う)。実際のANDPAD出力列名に合わせて調整すること。
   STATUS_HISTORY_KEY_COLUMN_CANDIDATES: ['案件名'],
-  // 転記条件となる「見込確度」列の名前候補(「週次報告記録」側の列名)。
+  // 転記条件となる「見込確度」列の名前候補(「報告記録」側の列名)。
   // 実際のANDPAD出力列名に合わせて調整すること。
   STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES: ['見込確度', '確度'],
-  // 履歴シートの各列に、「週次報告記録」側のどの列の値を転記するかの対応表。
-  // 値は「週次報告記録」側の列名候補の配列(先頭から探して最初に見つかったものを使う)。
+  // 履歴シートの各列に、「報告記録」側のどの列の値を転記するかの対応表。
+  // 値は「報告記録」側の列名候補の配列(先頭から探して最初に見つかったものを使う)。
   // 記録日時・案件名・昇降フラグ・変更前後の見込確度・変更経緯は別途組み立てるため、
   // ここには含めない。
   STATUS_HISTORY_FIELD_SOURCE_COLUMNS: {
@@ -84,7 +84,7 @@ const CONFIG = {
   // 表示して「週次ステータス変更履歴」に記録する機能(onConfidenceCellEdited)で使う設定。
   // 対象とする予材シート名(複数可)。実際の運用シート名に合わせて追加・変更すること。
   CONFIDENCE_EDIT_SHEET_NAMES: ['今月'],
-  // 「今月」シートは列見出しが「週次報告記録」側と一致しない(または見出し行の構成が異なる)ため、
+  // 「今月」シートは列見出しが「報告記録」側と一致しない(または見出し行の構成が異なる)ため、
   // ヘッダー名でのマッチングは行わず、ここに設定した固定の列位置から直接値を抽出する。
   // 実際の「今月」シートの列位置に合わせて調整すること。
   CONFIDENCE_EDIT_COLUMN_LETTERS: {
@@ -252,12 +252,12 @@ function appendFileToTargetSheet_(file, targetSheet) {
 }
 
 /**
- * 「週次報告記録」への直近の追記分(newRows)を、追記前の既存データ(previousRows)と
+ * 「報告記録」への直近の追記分(newRows)を、追記前の既存データ(previousRows)と
  * 案件単位で突き合わせ、「見込確度」(CONFIG.STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES)が
  * 変更前後で変化した案件だけを抽出して「週次ステータス変更履歴」シートの末尾に記録する。
  * (ステータスや進捗など見込確度以外の変更は転記対象にしない)
- * 案件を識別するキー列や見込確度列が「週次報告記録」に存在しない場合は、何もせずスキップする。
- * reportSheet・reportLastRow(追記前の最終行)は、履歴側の案件名セルに「週次報告記録」の
+ * 案件を識別するキー列や見込確度列が「報告記録」に存在しない場合は、何もせずスキップする。
+ * reportSheet・reportLastRow(追記前の最終行)は、履歴側の案件名セルに「報告記録」の
  * 該当行へ飛べるリンクを張るために使う(リンク自体の見た目はbuildStatusHistoryChange_を参照)。
  */
 function updateWeeklyStatusHistory_(reportSheet, reportLastRow, headerMap, previousRows, newRows, timestamp) {
@@ -349,7 +349,7 @@ function buildStatusHistoryChange_(fields, projectName, oldConfidence, newConfid
 }
 
 /**
- * 「週次報告記録」側の候補列名リストから最初に見つかった列の値を読み取る。
+ * 「報告記録」側の候補列名リストから最初に見つかった列の値を読み取る。
  * どれも見つからない場合は空文字を返す。
  */
 function readTrackedField_(headerMap, row, candidateNames) {
@@ -451,7 +451,7 @@ function findLastRowWithValueInColumn_(sheet, col, startRow) {
 
 /**
  * 案件名列に、既存シートの見た目(リンク青色 + 下線)に合わせたリッチテキストを設定する。
- * リンク先はchange['__案件名リンクURL']に組み立て済みの「週次報告記録」該当行への
+ * リンク先はchange['__案件名リンクURL']に組み立て済みの「報告記録」該当行への
  * 内部リンクで、リンクが無い場合(reportSheetの行が特定できなかった場合)でも
  * 色・下線のスタイルだけは既存の見た目に合わせて適用する。
  */
@@ -557,7 +557,7 @@ function getOrCreateStatusHistorySheet_() {
  * 登録すること(GASエディタで直接「onEdit」という名前の関数を作っても、この制限により
  * ダイアログの部分は動作しない)。
  *
- * - 「今月」シートは列見出しが「週次報告記録」側と一致しない(または見出し行の構成が異なる)ため、
+ * - 「今月」シートは列見出しが「報告記録」側と一致しない(または見出し行の構成が異なる)ため、
  *   ヘッダー名でのマッチングは行わず、CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERSに設定した
  *   固定の列位置から直接値を抽出する(readConfidenceEditField_参照)。
  * - 対象は「見込確度」列(CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERS['見込確度']、既定でO列)の
