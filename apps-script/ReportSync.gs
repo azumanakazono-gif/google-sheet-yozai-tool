@@ -1,5 +1,5 @@
 /**
- * 「週次報告記録」シートへの追記処理。
+ * 「報告記録」シートへの追記処理。
  * 依存: Config.gs (CONFIG) / Utils.gs (parseWeeklyReportFile_, ensureColumnsExist_,
  * writeValuesIgnoringValidation_) / StatusHistory.gs (updateWeeklyStatusHistory_)
  */

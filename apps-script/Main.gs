@@ -8,7 +8,7 @@
 
 /**
  * 週次: SOURCE_FOLDER_ID 配下に置かれたANDPAD出力の.xlsx（Googleスプレッドシートも可）を読み取り、
- * 「31期予材リスト」の「週次報告記録」シート末尾に追記する。
+ * 「31期予材リスト」の「報告記録」シート末尾に追記する。
  *
  * - Excelファイルは DriveApp + Utilities.unzip + XmlService のみで直接パースする（Advanced Drive
  *   Service、UrlFetchApp、外部API呼び出しは一切使わない）。ANDPAD等の「拡張子は.xlsxだが中身は
