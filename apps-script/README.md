@@ -1,11 +1,12 @@
 # 週次予材リスト同期スクリプト (Google Apps Script)
 
-Google Driveフォルダ内のExcel/スプレッドシートを読み取り、「31期予材リスト」スプレッドシートの
+Google Driveフォルダ内のExcel/スプレッドシートを読み取り、「(今期)予材リスト」スプレッドシート
+(現在は「31期予材リスト」。期が変わったときの切り替え方は[期(会計年度)が変わった場合の運用](#期会計年度が変わった場合の運用)を参照)の
 「報告記録」シート末尾に自動追記するGASスクリプトです。追記と連動して、見込確度が変化した
 案件だけを「週次ステータス変更履歴」シートにも自動記録します。
 
-- 取得元フォルダ: `1WrjMUtIpe2JEwChiJygRs1TeqWGgPuyc`
-- 追記先スプレッドシート: `1zTz2lLUD6M4SPBCcEO3OBxNMmv1U7RsUYRJhkKkgOOQ`（シート「報告記録」。`Config.gs`の`TARGET_SHEET_NAME`で変更可能）
+- 取得元フォルダ: `1WrjMUtIpe2JEwChiJygRs1TeqWGgPuyc`(`Config.gs`の`SOURCE_FOLDER_ID`)
+- 追記先スプレッドシート: `Config.gs`の`TARGET_SPREADSHEET_ID`で指定(現在は`1zTz2lLUD6M4SPBCcEO3OBxNMmv1U7RsUYRJhkKkgOOQ`。空文字にすると実行中のスクリプトがバインドされているスプレッドシートを自動的に使う)。シート名は「報告記録」（`Config.gs`の`TARGET_SHEET_NAME`で変更可能）
 
 ## ファイル構成
 
@@ -16,7 +17,7 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 | `Main.gs` | メイン処理 (`syncWeeklyReports`)、週次トリガー(`installWeeklyTrigger`)・見込確度手動編集トリガー(`installConfidenceChangeTrigger`)をスクリプトから設定するためのヘルパー、処理済みログのリセット関数(`resetProcessedLog`) |
 | `ReportSync.gs` | 「報告記録」シートへの追記処理 (`appendFileToTargetSheet_`) |
 | `StatusHistory.gs` | 「週次ステータス変更履歴」シートの自動更新処理。バッチ取り込み時(`updateWeeklyStatusHistory_`)・「今月」等の予材シートでの手動編集時(`onConfidenceCellEdited`)の両方の履歴作成・数式コピー・案件名リンク生成処理を含む |
-| `Utils.gs` | 取り込み元ファイルのパース(`parseWeeklyReportFile_`等)、および Drive・シート操作まわりの共通ユーティリティ関数 |
+| `Utils.gs` | 取り込み元ファイルのパース(`parseWeeklyReportFile_`等)、対象スプレッドシートの解決(`getTargetSpreadsheet_`。期が変わった際の切り替え方は後述)、および Drive・シート操作まわりの共通ユーティリティ関数 |
 | `コード.gs` | 上記5ファイルを1本にまとめた単一ファイル版。GASの標準ファイル名「コード.gs」にそのまま丸ごと貼り付けて使う想定 |
 
 `Config.gs`/`Main.gs`/`ReportSync.gs`/`StatusHistory.gs`/`Utils.gs`の5分割と`コード.gs`の単一ファイルは中身が重複しているだけで、同時に使う必要はない。GASプロジェクトにファイルを分けて置くなら前者5つを、1ファイルで完結させたいなら`コード.gs`のみを使う。**同一プロジェクト内で両方を貼り付けると`CONFIG`などが二重定義されエラーになるので注意。**
@@ -201,6 +202,45 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
    - イベントのソースを選択: `スプレッドシートから`
    - イベントの種類を選択: `編集時`
 4. 保存すると一覧にトリガーが表示される。
+
+## 期(会計年度)が変わった場合の運用
+
+「31期予材リスト」→「32期予材リスト」のように、期が変わって新しいスプレッドシートに
+切り替える際、コード内に期の番号や特定のファイル名がハードコーディングされていないか気にする
+必要はない(`TARGET_SHEET_NAME`「報告記録」・`STATUS_HISTORY_SHEET_NAME`「週次ステータス変更履歴」・
+`CONFIDENCE_EDIT_SHEET_NAMES`「今月」等のシート名設定は、いずれも期の番号を含まない名前で
+管理しており、新しい期のスプレッドシート側にも同名のシートさえあれば変更不要でそのまま
+連携される)。対象スプレッドシート自体の切り替えは、運用方法に応じて以下のいずれかで行う。
+
+### 方法A: スプレッドシートを丸ごと複製する(推奨・コード変更不要)
+
+このスクリプトを「対象スプレッドシートのコンテナバインド型スクリプト」(そのスプレッドシートを
+開いて「拡張機能」→「Apps Script」から編集できるプロジェクト)として運用し、`Config.gs`(または
+`コード.gs`)の`TARGET_SPREADSHEET_ID`を**空文字(`''`)**にしておく。
+
+1. 現在の期のスプレッドシートで「ファイル」→「コピーを作成」を実行し、新しい期用のファイル
+   (例:「32期予材リスト」)を作る。バインド型スクリプトはこの複製にそのままついてくる。
+2. 複製後のファイルの「報告記録」「週次ステータス変更履歴」「今月」等、必要なシートの中身を
+   新しい期用にクリア・整形する(シート名自体は変更しない)。
+3. 複製後のファイルを開いた状態のスクリプトエディタで、`installWeeklyTrigger` と
+   `installConfidenceChangeTrigger` を実行し直す(複製直後はトリガーが引き継がれないため、
+   複製先のスプレッドシートに対して新たにトリガーを張り直す必要がある)。
+4. 以降は`getTargetSpreadsheet_()`(`Utils.gs`/`コード.gs`)が`SpreadsheetApp.getActiveSpreadsheet()`
+   で複製後のスプレッドシートを自動的に返すため、`Config.gs`側のコード変更は一切不要。
+
+### 方法B: 1つのスクリプトプロジェクトでIDだけ切り替える(最小限の設定変更)
+
+スタンドアロンのスクリプトプロジェクトとして運用している場合や、時間主導型トリガーの実行時に
+アクティブなスプレッドシートが存在しない環境では、`TARGET_SPREADSHEET_ID`に明示的なIDを設定する
+従来の運用のままでよい。期が変わったら以下の3点だけを行う。
+
+1. `Config.gs`(および`コード.gs`を使っている場合はそちらも)の`TARGET_SPREADSHEET_ID`を
+   新しい期のスプレッドシートIDに書き換える。
+2. `installWeeklyTrigger` と `installConfidenceChangeTrigger` を実行し直し、新しいスプレッドシートに
+   対してトリガーを張り直す(古いトリガーは各関数が自動で削除してから作り直す)。
+3. `TARGET_SHEET_NAME`・`STATUS_HISTORY_SHEET_NAME`・`CONFIDENCE_EDIT_SHEET_NAMES`・
+   `CONFIDENCE_EDIT_COLUMN_LETTERS`等、シート名・列位置に関する設定は、新しい期のスプレッドシートの
+   実際のシート構成が従来と異なる場合のみ調整する(通常は変更不要)。
 
 ## 補足・前提条件
 

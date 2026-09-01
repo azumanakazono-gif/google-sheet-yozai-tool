@@ -28,8 +28,23 @@ const CONFIG = {
   PROCESSED_FOLDER_NAME: '処理済み',
   ERROR_FOLDER_NAME: 'エラー',
 
-  // 追記先: 「31期予材リスト」スプレッドシート
+  // 追記先: 「(今期)予材リスト」スプレッドシート(現在は「31期予材リスト」)。
+  // 【重要: 期(会計年度)が変わったときの切り替え方】getTargetSpreadsheet_()が
+  // この値を見て対象スプレッドシートを解決する。
+  //   - 空文字('')にすると SpreadsheetApp.getActiveSpreadsheet() で自動解決する。
+  //     このスクリプトを「対象スプレッドシートのコンテナバインド型スクリプト」として運用し、
+  //     期が変わるたびに現在のスプレッドシートを「ファイル」>「コピーを作成」で丸ごと複製する
+  //     運用にしておけば、複製先にスクリプトごと複製されるため、この値を空文字のままにして
+  //     おくだけでコード側は一切変更不要のまま新しい期のスプレッドシートに切り替わる(推奨)。
+  //   - 具体的なスプレッドシートIDを設定すると、常にそのIDのスプレッドシートを開く(従来通り)。
+  //     1つのスタンドアロン スクリプト プロジェクトで複数期のスプレッドシートを渡り歩く場合や、
+  //     時間主導型トリガーの実行時にアクティブなスプレッドシートが存在しない環境ではこちらを使う。
+  //     この場合、期が変わったらこの値を新しいスプレッドシートのIDに書き換えるだけでよく、
+  //     他のコード・他の設定項目(下記シート名等)は一切変更不要。
   TARGET_SPREADSHEET_ID: '1zTz2lLUD6M4SPBCcEO3OBxNMmv1U7RsUYRJhkKkgOOQ',
+  // 「報告記録」「週次ステータス変更履歴」「今月」等のシート名(下記)は期の番号を含まない
+  // 名前で管理しているため、期が変わっても新しいスプレッドシート側に同名のシートさえ
+  // あれば、この設定自体は変更不要で引き続き正しく連携される。
   TARGET_SHEET_NAME: '報告記録',
 
   // 週次ステータス変更履歴: 「報告記録」への追記直後に、直近の取り込み分から
@@ -131,6 +146,10 @@ function syncWeeklyReports() {
     const processedFolder = getOrCreateSubFolder_(sourceFolder, CONFIG.PROCESSED_FOLDER_NAME);
     const errorFolder = getOrCreateSubFolder_(sourceFolder, CONFIG.ERROR_FOLDER_NAME);
     const targetSheet = getTargetSheet_();
+    // CONFIG.TARGET_SPREADSHEET_IDが空文字(=getActiveSpreadsheet()で自動解決)の場合でも
+    // 対象スプレッドシート自身をソースファイルとして誤って処理しないよう、解決済みの
+    // targetSheetから実際のIDを取得して比較する(CONFIG.TARGET_SPREADSHEET_IDを直接見ない)。
+    const targetSpreadsheetId = targetSheet.getParent().getId();
 
     const files = sourceFolder.getFiles();
     const errors = [];
@@ -141,7 +160,7 @@ function syncWeeklyReports() {
       const file = files.next();
 
       if (!isSupportedSpreadsheet_(file)) continue;
-      if (file.getId() === CONFIG.TARGET_SPREADSHEET_ID) continue;
+      if (file.getId() === targetSpreadsheetId) continue;
 
       if (isAlreadyProcessed_(file.getId())) {
         Logger.log('既に処理済み(記録あり)のためスキップ、処理済みフォルダへ移動します: ' + file.getName());
@@ -577,9 +596,11 @@ function findNearestFormulaRow_(sheet, col, fromRow, minRow) {
 
 /**
  * 「週次ステータス変更履歴」シートを取得する。存在しなければ新規作成する。
+ * 対象スプレッドシートの解決はgetTargetSpreadsheet_()に委ねる(期が変わった際の
+ * 切り替え方はそちらのコメントを参照)。
  */
 function getOrCreateStatusHistorySheet_() {
-  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  const ss = getTargetSpreadsheet_();
   let sheet = ss.getSheetByName(CONFIG.STATUS_HISTORY_SHEET_NAME);
   if (!sheet) {
     sheet = ss.insertSheet(CONFIG.STATUS_HISTORY_SHEET_NAME);
@@ -1375,8 +1396,37 @@ function getOrCreateSubFolder_(parentFolder, name) {
   return parentFolder.createFolder(name);
 }
 
+/**
+ * 「予材リスト」(報告記録・週次ステータス変更履歴・今月シート等)が入っている
+ * 対象スプレッドシートを取得する。
+ *
+ * 【重要: 期(会計年度)が変わったときの切り替え方】
+ * - CONFIG.TARGET_SPREADSHEET_ID が空文字の場合は SpreadsheetApp.getActiveSpreadsheet()
+ *   (=このスクリプトプロジェクトがコンテナバインドされているスプレッドシート、または
+ *   インストーラブルトリガーの発火元スプレッドシート)を返す。
+ *   このため、期が変わった際に「現在のスプレッドシートを丸ごと複製する」(Google Sheets の
+ *   「ファイル」>「コピーを作成」)運用にしておけば、コンテナバインド型スクリプトも複製先に
+ *   自動的について来るため、TARGET_SPREADSHEET_ID を空文字のままにしておくだけで
+ *   コード側は一切変更不要のまま新しい期のスプレッドシートに切り替わる。
+ * - CONFIG.TARGET_SPREADSHEET_ID に具体的なIDを設定した場合は、常にそのIDのスプレッドシートを
+ *   SpreadsheetApp.openById()で開く(従来通りの挙動)。1つのスタンドアロン スクリプト
+ *   プロジェクトで複数期のスプレッドシートを渡り歩くように運用したい場合や、
+ *   時間主導型トリガー実行時にアクティブなスプレッドシートが存在しない環境向け。
+ *   この場合、期が変わったらこの値だけを新しいスプレッドシートのIDに書き換えれば良い
+ *   (コードの他の箇所は一切変更不要)。
+ * どちらの運用でも、「報告記録」「週次ステータス変更履歴」「今月」等のシート名自体は
+ * CONFIG.TARGET_SHEET_NAME / CONFIG.STATUS_HISTORY_SHEET_NAME / CONFIG.CONFIDENCE_EDIT_SHEET_NAMES
+ * で管理しており、期の番号を含まない名前のため、新しい期のスプレッドシート側にも
+ * 同名のシートさえあれば変更不要で連携される。
+ */
+function getTargetSpreadsheet_() {
+  return CONFIG.TARGET_SPREADSHEET_ID
+    ? SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID)
+    : SpreadsheetApp.getActiveSpreadsheet();
+}
+
 function getTargetSheet_() {
-  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  const ss = getTargetSpreadsheet_();
   let sheet = ss.getSheetByName(CONFIG.TARGET_SHEET_NAME);
   if (!sheet) {
     sheet = ss.insertSheet(CONFIG.TARGET_SHEET_NAME);
@@ -1415,9 +1465,12 @@ function installWeeklyTrigger() {
  * 必ず「インストーラブル トリガー」として、イベントの種類を「編集時」で設定すること。
  * 単純トリガーのonEdit(e)ではダイアログが表示できないため、この機能には使えない。)
  * 既存の onConfidenceCellEdited 用トリガーがあれば一旦削除してから作り直す。
+ * 対象スプレッドシートの解決はgetTargetSpreadsheet_()に委ねる。期が変わって新しい
+ * スプレッドシートに切り替えた場合も、この関数を再実行するだけで新しい対象スプレッドシートに
+ * 対してトリガーが張り直される。
  */
 function installConfidenceChangeTrigger() {
-  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  const ss = getTargetSpreadsheet_();
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
     if (trigger.getHandlerFunction() === 'onConfidenceCellEdited') {
       ScriptApp.deleteTrigger(trigger);

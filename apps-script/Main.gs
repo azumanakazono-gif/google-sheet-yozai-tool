@@ -30,6 +30,10 @@ function syncWeeklyReports() {
     const processedFolder = getOrCreateSubFolder_(sourceFolder, CONFIG.PROCESSED_FOLDER_NAME);
     const errorFolder = getOrCreateSubFolder_(sourceFolder, CONFIG.ERROR_FOLDER_NAME);
     const targetSheet = getTargetSheet_();
+    // CONFIG.TARGET_SPREADSHEET_IDが空文字(=getActiveSpreadsheet()で自動解決)の場合でも
+    // 対象スプレッドシート自身をソースファイルとして誤って処理しないよう、解決済みの
+    // targetSheetから実際のIDを取得して比較する(CONFIG.TARGET_SPREADSHEET_IDを直接見ない)。
+    const targetSpreadsheetId = targetSheet.getParent().getId();
 
     const files = sourceFolder.getFiles();
     const errors = [];
@@ -40,7 +44,7 @@ function syncWeeklyReports() {
       const file = files.next();
 
       if (!isSupportedSpreadsheet_(file)) continue;
-      if (file.getId() === CONFIG.TARGET_SPREADSHEET_ID) continue;
+      if (file.getId() === targetSpreadsheetId) continue;
 
       if (isAlreadyProcessed_(file.getId())) {
         Logger.log('既に処理済み(記録あり)のためスキップ、処理済みフォルダへ移動します: ' + file.getName());
@@ -111,9 +115,12 @@ function installWeeklyTrigger() {
  * 必ず「インストーラブル トリガー」として、イベントの種類を「編集時」で設定すること。
  * 単純トリガーのonEdit(e)ではダイアログが表示できないため、この機能には使えない。)
  * 既存の onConfidenceCellEdited 用トリガーがあれば一旦削除してから作り直す。
+ * 対象スプレッドシートの解決はgetTargetSpreadsheet_()に委ねる(Utils.gs参照)。
+ * 期が変わって新しいスプレッドシートに切り替えた場合も、この関数を再実行するだけで
+ * 新しい対象スプレッドシートに対してトリガーが張り直される。
  */
 function installConfidenceChangeTrigger() {
-  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  const ss = getTargetSpreadsheet_();
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
     if (trigger.getHandlerFunction() === 'onConfidenceCellEdited') {
       ScriptApp.deleteTrigger(trigger);

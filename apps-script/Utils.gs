@@ -566,8 +566,37 @@ function getOrCreateSubFolder_(parentFolder, name) {
   return parentFolder.createFolder(name);
 }
 
+/**
+ * 「予材リスト」(報告記録・週次ステータス変更履歴・今月シート等)が入っている
+ * 対象スプレッドシートを取得する。
+ *
+ * 【重要: 期(会計年度)が変わったときの切り替え方】
+ * - CONFIG.TARGET_SPREADSHEET_ID が空文字の場合は SpreadsheetApp.getActiveSpreadsheet()
+ *   (=このスクリプトプロジェクトがコンテナバインドされているスプレッドシート、または
+ *   インストーラブルトリガーの発火元スプレッドシート)を返す。
+ *   このため、期が変わった際に「現在のスプレッドシートを丸ごと複製する」(Google Sheets の
+ *   「ファイル」>「コピーを作成」)運用にしておけば、コンテナバインド型スクリプトも複製先に
+ *   自動的について来るため、TARGET_SPREADSHEET_ID を空文字のままにしておくだけで
+ *   コード側は一切変更不要のまま新しい期のスプレッドシートに切り替わる。
+ * - CONFIG.TARGET_SPREADSHEET_ID に具体的なIDを設定した場合は、常にそのIDのスプレッドシートを
+ *   SpreadsheetApp.openById()で開く(従来通りの挙動)。1つのスタンドアロン スクリプト
+ *   プロジェクトで複数期のスプレッドシートを渡り歩くように運用したい場合や、
+ *   時間主導型トリガー実行時にアクティブなスプレッドシートが存在しない環境向け。
+ *   この場合、期が変わったら Config.gs のこの値だけを新しいスプレッドシートのIDに
+ *   書き換えれば良い(コードの他の箇所は一切変更不要)。
+ * どちらの運用でも、「報告記録」「週次ステータス変更履歴」「今月」等のシート名自体は
+ * CONFIG.TARGET_SHEET_NAME / CONFIG.STATUS_HISTORY_SHEET_NAME / CONFIG.CONFIDENCE_EDIT_SHEET_NAMES
+ * で管理しており、期の番号を含まない名前のため、新しい期のスプレッドシート側にも
+ * 同名のシートさえあれば変更不要で連携される。
+ */
+function getTargetSpreadsheet_() {
+  return CONFIG.TARGET_SPREADSHEET_ID
+    ? SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID)
+    : SpreadsheetApp.getActiveSpreadsheet();
+}
+
 function getTargetSheet_() {
-  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  const ss = getTargetSpreadsheet_();
   let sheet = ss.getSheetByName(CONFIG.TARGET_SHEET_NAME);
   if (!sheet) {
     sheet = ss.insertSheet(CONFIG.TARGET_SHEET_NAME);

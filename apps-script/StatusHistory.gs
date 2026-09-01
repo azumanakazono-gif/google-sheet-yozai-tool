@@ -326,9 +326,11 @@ function findNearestFormulaRow_(sheet, col, fromRow, minRow) {
 
 /**
  * 「週次ステータス変更履歴」シートを取得する。存在しなければ新規作成する。
+ * 対象スプレッドシートの解決はgetTargetSpreadsheet_()に委ねる(Utils.gs参照。
+ * 期が変わった際の切り替え方もそちらのコメントを参照)。
  */
 function getOrCreateStatusHistorySheet_() {
-  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  const ss = getTargetSpreadsheet_();
   let sheet = ss.getSheetByName(CONFIG.STATUS_HISTORY_SHEET_NAME);
   if (!sheet) {
     sheet = ss.insertSheet(CONFIG.STATUS_HISTORY_SHEET_NAME);
