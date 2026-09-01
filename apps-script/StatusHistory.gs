@@ -323,35 +323,40 @@ function getOrCreateStatusHistorySheet_() {
  * - 記録に失敗しても例外は投げず、ログとアラートに留める(セルの編集自体は既に確定しているため)。
  */
 function onConfidenceCellEdited(e) {
-  if (!e || !e.range) return;
-
-  const sheet = e.range.getSheet();
-  if (CONFIG.CONFIDENCE_EDIT_SHEET_NAMES.indexOf(sheet.getName()) === -1) return;
-
-  // ペースト等の複数セル編集はoldValueを個別に取得できないため対象外。
-  if (e.range.getNumRows() !== 1 || e.range.getNumColumns() !== 1) return;
-
-  const editedRow = e.range.getRow();
-  if (editedRow === 1) return; // ヘッダー行自体の編集は対象外
-
-  const confidenceCol = columnLetterToIndex_(CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERS['見込確度']);
-  if (e.range.getColumn() !== confidenceCol) return;
-
-  const lastCol = sheet.getLastColumn();
-  if (lastCol === 0) return;
-  // 編集された行の現在値(編集確定後の状態)をまとめて取得し、以降はここから固定列位置で
-  // 直接読み取る(ヘッダー名マッチングには依存しない)。
-  const rowValues = sheet.getRange(editedRow, 1, 1, lastCol).getValues()[0];
-
-  const oldConfidence = e.oldValue !== undefined ? e.oldValue : '';
-  // 変更後の値はe.valueではなく、確定後の状態を反映するrowValues(上で取得済み)から読む方が
-  // 確実(貼り付け以外の一部の編集種別ではe.valueが入らないことがあるため)。
-  const newConfidence = readConfidenceEditField_(rowValues, '見込確度');
-  // 変更前見込確度が空欄(=新規登録による初回設定)の場合は「確度の変更」ではないため対象外とする。
-  if (normalizeHistoryValue_(oldConfidence) === '') return;
-  if (historyValuesEqual_(oldConfidence, newConfidence)) return;
-
+  // 【重要】以前はガード判定(シート名・列位置チェック等)をtryの外に書いていたため、
+  // その部分で例外が起きると(例: CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERSの設定ミスや
+  // シート構成の変更によるgetRange失敗など)ログにすら残らず、ポップアップも履歴記録も
+  // 一切発生しないまま処理が終わっていた。関数全体をtryで包み、原因を問わず失敗時は
+  // 必ずログ・トースト・アラートのいずれかで気づけるようにする。
   try {
+    if (!e || !e.range) return;
+
+    const sheet = e.range.getSheet();
+    if (CONFIG.CONFIDENCE_EDIT_SHEET_NAMES.indexOf(sheet.getName()) === -1) return;
+
+    // ペースト等の複数セル編集はoldValueを個別に取得できないため対象外。
+    if (e.range.getNumRows() !== 1 || e.range.getNumColumns() !== 1) return;
+
+    const editedRow = e.range.getRow();
+    if (editedRow === 1) return; // ヘッダー行自体の編集は対象外
+
+    const confidenceCol = columnLetterToIndex_(CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERS['見込確度']);
+    if (e.range.getColumn() !== confidenceCol) return;
+
+    const lastCol = sheet.getLastColumn();
+    if (lastCol === 0) return;
+    // 編集された行の現在値(編集確定後の状態)をまとめて取得し、以降はここから固定列位置で
+    // 直接読み取る(ヘッダー名マッチングには依存しない)。
+    const rowValues = sheet.getRange(editedRow, 1, 1, lastCol).getValues()[0];
+
+    const oldConfidence = e.oldValue !== undefined ? e.oldValue : '';
+    // 変更後の値はe.valueではなく、確定後の状態を反映するrowValues(上で取得済み)から読む方が
+    // 確実(貼り付け以外の一部の編集種別ではe.valueが入らないことがあるため)。
+    const newConfidence = readConfidenceEditField_(rowValues, '見込確度');
+    // 変更前見込確度が空欄(=新規登録による初回設定)の場合は「確度の変更」ではないため対象外とする。
+    if (normalizeHistoryValue_(oldConfidence) === '') return;
+    if (historyValuesEqual_(oldConfidence, newConfidence)) return;
+
     const projectName = String(readConfidenceEditField_(rowValues, '案件名')).trim();
     const displayName = projectName || ('(' + sheet.getName() + ' ' + editedRow + '行目)');
 
@@ -383,13 +388,25 @@ function onConfidenceCellEdited(e) {
   } catch (err) {
     Logger.log(
       '週次ステータス変更履歴(手動編集分)の記録に失敗しました: ' +
-        sheet.getName() + '!' + e.range.getA1Notation() + ' / ' + err
+        (e && e.range ? e.range.getSheet().getName() + '!' + e.range.getA1Notation() : '(不明なセル)') +
+        ' / ' + err
     );
-    try {
-      SpreadsheetApp.getUi().alert('見込確度の変更履歴の記録に失敗しました。管理者に連絡してください。\n' + err);
-    } catch (uiErr) {
-      // アラート表示自体に失敗しても、記録失敗の実害はログに残っているため無視する。
-    }
+    notifyConfidenceEditError_(err);
+  }
+}
+
+/**
+ * onConfidenceCellEdited内の例外を、Logger.logだけでなく画面上にも必ず気づける形で通知する。
+ * Ui.alertはダイアログが閉じられるまで処理をブロックするため、まずtoast(自動で消える通知)を
+ * 出し、それも失敗する場合(Uiサービス自体が使えない等)のみログのみに留める。
+ */
+function notifyConfidenceEditError_(err) {
+  try {
+    SpreadsheetApp.getActiveSpreadsheet().toast(
+      String(err), '見込確度の変更履歴の記録でエラーが発生しました', 10
+    );
+  } catch (toastErr) {
+    Logger.log('エラー通知(toast)にも失敗しました: ' + toastErr);
   }
 }
 
