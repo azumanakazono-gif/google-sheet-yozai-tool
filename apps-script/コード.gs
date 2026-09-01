@@ -72,6 +72,15 @@ const CONFIG = {
   // 昇降フラグ列の名前。数式で↑/↓が算出される列のため、GASは値を書き込まず、
   // 既存行の数式をコピーして新規行に適用するためだけに使う。
   STATUS_HISTORY_RANK_FLAG_COLUMN: '昇降フラグ',
+  // 【重要】appendStatusHistoryRows_は、STATUS_HISTORY_COLUMNSのうちこの配列に含まれる
+  // 列名には一切値を書き込まない(セルに直接触れない)。「昇降フラグ」はシート側の数式
+  // (H列・I列を比較する数式)を保持するため、「変更経緯」は手動編集時のみ
+  // writeChangeReason_で個別に(理由が入力された場合だけ)追記更新する運用のため、
+  // それぞれ除外している。以前は行全体を履歴シートの最終列幅の配列としてまとめて
+  // 書き込んでいたため、これらの列も含めて空文字で上書きしてしまい、既存の数式や
+  // (行を先に用意して手動でメモ書きしていた場合の)入力内容を消してしまう恐れがあった。
+  // ここに列名を追加すれば、同様に「スクリプトからは触れさせたくない列」を増やせる。
+  STATUS_HISTORY_PROTECTED_COLUMNS: ['昇降フラグ', '変更経緯'],
   // 案件名列(既存シートの見た目に合わせたリンク色)。既定はGoogle Sheetsのリンク標準色。
   STATUS_HISTORY_LINK_COLOR: '#1155cc',
   // 「報告記録」内で案件を一意に識別するための列名候補(先頭から順に探し、
@@ -419,6 +428,18 @@ function formatHistoryValue_(value) {
  * 見込確度が変化した案件を「週次ステータス変更履歴」シートの末尾に追記する。
  * 列はCONFIG.STATUS_HISTORY_COLUMNSの名前でマッチングするため、シート側の列順が
  * 変わっていても正しい列に入り、シートが空の場合はこの並びでヘッダーを新規作成する。
+ *
+ * 【重要】CONFIG.STATUS_HISTORY_PROTECTED_COLUMNS(既定: 昇降フラグ・変更経緯)に
+ * 含まれる列には一切書き込まない。以前は追記行をhistorySheet.getLastColumn()幅の
+ * 配列としてまとめて1回のsetValuesで書き込んでいたため、これらの列も含めて空文字で
+ * 上書きしてしまい、シート側の数式(昇降フラグ)や、行を先に用意して手動でメモ書きして
+ * いた内容(変更経緯等)を消してしまう恐れがあった。現在は書き込み対象の列だけを
+ * 1列ずつ個別のRangeとして書き込むため、保護対象の列や、STATUS_HISTORY_COLUMNSに
+ * 無い列(このシートに管理外の列が追加されている場合)には一切アクセスせず、
+ * 既存の内容がそのまま保持される。
+ * 「変更経緯」は、手動編集時のみwriteChangeReason_で(理由が入力された場合だけ)
+ * 別途追記更新する(onConfidenceCellEdited参照)。
+ *
  * 戻り値: 実際に書き込んだ最初の行番号(1件のみ追記した場合は、その行番号そのもの)。
  * onConfidenceCellEdited側で、後から変更経緯セルだけを追記更新するために使う。
  */
@@ -427,17 +448,10 @@ function appendStatusHistoryRows_(changes) {
   const historyColumns = CONFIG.STATUS_HISTORY_COLUMNS;
   const headerRowNumber = CONFIG.STATUS_HISTORY_HEADER_ROW || 1;
   const historyHeaderMap = ensureColumnsExist_(historySheet, historyColumns, historyColumns, headerRowNumber);
-  const historyTotalCols = historySheet.getLastColumn();
 
-  const historyRows = changes.map(function (change) {
-    const outRow = new Array(historyTotalCols).fill('');
-    historyColumns.forEach(function (colName) {
-      const col = historyHeaderMap[colName];
-      if (col && change[colName] !== undefined) {
-        outRow[col - 1] = change[colName];
-      }
-    });
-    return outRow;
+  const protectedColumns = CONFIG.STATUS_HISTORY_PROTECTED_COLUMNS || [];
+  const writableColumns = historyColumns.filter(function (colName) {
+    return protectedColumns.indexOf(colName) === -1;
   });
 
   // getLastRow()はシート全体(どの列でもよい)の最終行を見るため、他の列に離れた場所まで
@@ -448,8 +462,19 @@ function appendStatusHistoryRows_(changes) {
   const dateCol = historyHeaderMap[historyColumns[0]];
   const dataStartRow = headerRowNumber + 1;
   const historyLastRow = findLastRowWithValueInColumn_(historySheet, dateCol, dataStartRow);
-  const historyAppendRange = historySheet.getRange(historyLastRow + 1, 1, historyRows.length, historyTotalCols);
-  writeValuesIgnoringValidation_(historyAppendRange, historyRows);
+  const startRow = historyLastRow + 1;
+
+  // 行ごとではなく列ごとに1回のRange.setValuesでまとめて書き込む。こうすることで、
+  // 書き込み対象の列だけに絞ったRangeを扱えるため、保護対象の列(昇降フラグ・変更経緯等)や
+  // STATUS_HISTORY_COLUMNSに無い列には一切Rangeが及ばず、確実に触れずに済む。
+  writableColumns.forEach(function (colName) {
+    const col = historyHeaderMap[colName];
+    if (!col) return;
+    const columnValues = changes.map(function (change) {
+      return [change[colName] !== undefined ? change[colName] : ''];
+    });
+    writeValuesIgnoringValidation_(historySheet.getRange(startRow, col, columnValues.length, 1), columnValues);
+  });
 
   // 昇降フラグの数式コピー・案件名リンクの設定は見た目を整えるための付随処理。
   // ここで例外が発生しても、直前に書き込んだ履歴データ自体(記録日時・見込確度の変化等)を
@@ -457,7 +482,7 @@ function appendStatusHistoryRows_(changes) {
   // せず、ログにのみ残す(そうしないと「本体は記録できたのに全体が失敗扱いになり、
   // 履歴が更新されていないように見える」事態になる)。
   try {
-    applyRankFlagFormula_(historySheet, historyHeaderMap, historyLastRow, historyRows.length);
+    applyRankFlagFormula_(historySheet, historyHeaderMap, historyLastRow, changes.length);
   } catch (err) {
     Logger.log('週次ステータス変更履歴: 昇降フラグの数式コピーに失敗しました(記録データ自体は書き込み済み): ' + err);
   }
@@ -467,7 +492,7 @@ function appendStatusHistoryRows_(changes) {
     Logger.log('週次ステータス変更履歴: 案件名リンクの設定に失敗しました(記録データ自体は書き込み済み): ' + err);
   }
 
-  return historyLastRow + 1;
+  return startRow;
 }
 
 /**
