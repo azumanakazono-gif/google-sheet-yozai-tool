@@ -2,7 +2,24 @@
  * 「週次ステータス変更履歴」シートの自動更新処理。
  * - バッチ取り込み時: updateWeeklyStatusHistory_ (appendFileToTargetSheet_ から呼ばれる)
  * - 「今月」等の予材シートでの手動編集時: onConfidenceCellEdited (編集トリガーから呼ばれる)
- * 依存: Config.gs (CONFIG) / Utils.gs (ensureColumnsExist_, writeValuesIgnoringValidation_)
+ *
+ * このファイル単体で完結しており、他の分割ファイルの名前(Main.gs/ReportSync.gs/Utils.gs等)には
+ * 依存しない。GASは同一プロジェクト内の全.gsファイルをまとめて1つのグローバルスコープとして
+ * 実行するため、ファイル名は何でもよく、以下さえプロジェクト内のどこかに存在すればよい。
+ *
+ * 依存(プロジェクト内のどこかに存在すればよい):
+ * - CONFIG(設定オブジェクト。例: Config.gs) … 参照する主なキーは以下:
+ *   TARGET_SPREADSHEET_ID, TIME_ZONE, STATUS_HISTORY_SHEET_NAME, STATUS_HISTORY_HEADER_ROW,
+ *   STATUS_HISTORY_TIMESTAMP_FORMAT, STATUS_HISTORY_COLUMNS, STATUS_HISTORY_PROTECTED_COLUMNS,
+ *   STATUS_HISTORY_RANK_FLAG_COLUMN, STATUS_HISTORY_LINK_COLOR,
+ *   STATUS_HISTORY_KEY_COLUMN_CANDIDATES, STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES,
+ *   STATUS_HISTORY_FIELD_SOURCE_COLUMNS, CONFIDENCE_EDIT_SHEET_NAMES,
+ *   CONFIDENCE_EDIT_COLUMN_LETTERS
+ * - ensureColumnsExist_ / writeValuesIgnoringValidation_ / columnLetterToIndex_ /
+ *   getTargetSpreadsheet_ (共通ユーティリティ関数。例: Utils.gs)
+ * - updateWeeklyStatusHistory_ の呼び出し元(バッチ取り込み処理側。例: ReportSync.gs)
+ * - onConfidenceCellEdited を編集時のインストーラブルトリガーとして登録する処理
+ *   (例: Main.gs / Triggers.gs の installConfidenceChangeTrigger 等)
  */
 
 /**
