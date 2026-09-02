@@ -26,7 +26,10 @@ function installWeeklyTrigger() {
  * 既存の onConfidenceCellEdited 用トリガーがあれば一旦削除してから作り直す。
  */
 function installConfidenceChangeTrigger() {
-  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  const ss = (typeof CONFIG !== 'undefined' && CONFIG.TARGET_SPREADSHEET_ID)
+    ? SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID)
+    : SpreadsheetApp.getActiveSpreadsheet();
+
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
     if (trigger.getHandlerFunction() === 'onConfidenceCellEdited') {
       ScriptApp.deleteTrigger(trigger);
