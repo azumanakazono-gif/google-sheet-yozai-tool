@@ -14,13 +14,14 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 | --- | --- |
 | `appsscript.json` | マニフェスト（タイムゾーン等のみ。Advanced Serviceや特別な`oauthScopes`設定は不要） |
 | `Config.gs` | フォルダID・シート名などの設定値 (`CONFIG`) |
-| `Main.gs` | メイン処理 (`syncWeeklyReports`)、週次トリガー(`installWeeklyTrigger`)・見込確度手動編集トリガー(`installConfidenceChangeTrigger`)をスクリプトから設定するためのヘルパー、処理済みログのリセット関数(`resetProcessedLog`) |
+| `WeeklySync.gs` | メイン処理 (`syncWeeklyReports`)、処理済みログのリセット関数(`resetProcessedLog`) |
+| `Triggers.gs` | 週次トリガー(`installWeeklyTrigger`)・見込確度手動編集トリガー(`installConfidenceChangeTrigger`)をスクリプトから設定するためのヘルパー |
 | `ReportSync.gs` | 「報告記録」シートへの追記処理 (`appendFileToTargetSheet_`) |
 | `StatusHistory.gs` | 「週次ステータス変更履歴」シートの自動更新処理。バッチ取り込み時(`updateWeeklyStatusHistory_`)・「今月」等の予材シートでの手動編集時(`onConfidenceCellEdited`)の両方の履歴作成・数式コピー・案件名リンク生成処理を含む |
 | `Utils.gs` | 取り込み元ファイルのパース(`parseWeeklyReportFile_`等)、対象スプレッドシートの解決(`getTargetSpreadsheet_`。期が変わった際の切り替え方は後述)、および Drive・シート操作まわりの共通ユーティリティ関数 |
-| `コード.gs` | 上記5ファイルを1本にまとめた単一ファイル版。GASの標準ファイル名「コード.gs」にそのまま丸ごと貼り付けて使う想定 |
+| `コード.gs` | 上記6ファイルを1本にまとめた単一ファイル版。GASの標準ファイル名「コード.gs」にそのまま丸ごと貼り付けて使う想定 |
 
-`Config.gs`/`Main.gs`/`ReportSync.gs`/`StatusHistory.gs`/`Utils.gs`の5分割と`コード.gs`の単一ファイルは中身が重複しているだけで、同時に使う必要はない。GASプロジェクトにファイルを分けて置くなら前者5つを、1ファイルで完結させたいなら`コード.gs`のみを使う。**同一プロジェクト内で両方を貼り付けると`CONFIG`などが二重定義されエラーになるので注意。**
+`Config.gs`/`WeeklySync.gs`/`Triggers.gs`/`ReportSync.gs`/`StatusHistory.gs`/`Utils.gs`の6分割と`コード.gs`の単一ファイルは中身が重複しているだけで、同時に使う必要はない。GASプロジェクトにファイルを分けて置くなら前者6つを、1ファイルで完結させたいなら`コード.gs`のみを使う。**同一プロジェクト内で両方を貼り付けると`CONFIG`などが二重定義されエラーになるので注意。**
 
 ## 処理内容
 
@@ -164,10 +165,10 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 3. エディタ上部の関数選択で `syncWeeklyReports` を選び、一度手動実行して権限承認（Drive・スプレッドシートへのアクセス許可）を行う。
 4. 実行ログ (表示 → 実行数、またはログ) で正常終了・追記結果を確認する。
 
-### 分割ファイル版（`Config.gs`/`Main.gs`/`ReportSync.gs`/`StatusHistory.gs`/`Utils.gs`）を使う場合
+### 分割ファイル版（`Config.gs`/`WeeklySync.gs`/`Triggers.gs`/`ReportSync.gs`/`StatusHistory.gs`/`Utils.gs`）を使う場合
 
 1. 上記1と同様にプロジェクトを作成する。
-2. `Config.gs` / `Main.gs` / `ReportSync.gs` / `StatusHistory.gs` / `Utils.gs` の内容をそれぞれ同名のスクリプトファイルとして貼り付ける（デフォルトの「コード.gs」は削除するか空にしておく）。
+2. `Config.gs` / `WeeklySync.gs` / `Triggers.gs` / `ReportSync.gs` / `StatusHistory.gs` / `Utils.gs` の内容をそれぞれ同名のスクリプトファイルとして貼り付ける（デフォルトの「コード.gs」は削除するか空にしておく）。
 3. 上記の3〜4と同様の手順（手動実行 → 権限承認 → ログ確認）を行う。
 
 ## 週次トリガーの設定手順
@@ -189,7 +190,7 @@ Google Driveフォルダ内のExcel/スプレッドシートを読み取り、�
 
 エディタ上部の関数選択で `installWeeklyTrigger` を選び、一度実行する。
 毎週月曜6時台に `syncWeeklyReports` を実行するトリガーが作成される（既存の同名トリガーがあれば作り直される）。
-曜日・時刻を変えたい場合は `Main.gs` の `onWeekDay(...)` / `atHour(...)` を編集する。
+曜日・時刻を変えたい場合は `Triggers.gs` の `onWeekDay(...)` / `atHour(...)` を編集する。
 
 ## 見込確度の手動編集トリガーの設定手順
 
