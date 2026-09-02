@@ -2,7 +2,7 @@
  * 予材リスト週次同期スクリプト（単一ファイル版）
  *
  * - SOURCE_FOLDER_ID 配下のANDPAD出力Excelファイル（Googleスプレッドシートも可）を読み取り、
- *   「31期予材リスト」の「週次報告記録」シート末尾に追記する。
+ *   「31期予材リスト」の「報告記録」シート末尾に追記する。
  * - Excelファイルは DriveApp + Utilities.unzip + XmlService のみで直接パースする（Advanced Drive
  *   Service、UrlFetchApp、外部API呼び出しは一切使わない）。ANDPAD等の「拡張子は.xlsxだが中身は
  *   標準ZIPではない(HTMLテーブルやCSV/TSV等)」出力にも対応するため、先頭バイトや中身のテキストで
@@ -28,11 +28,26 @@ const CONFIG = {
   PROCESSED_FOLDER_NAME: '処理済み',
   ERROR_FOLDER_NAME: 'エラー',
 
-  // 追記先: 「31期予材リスト」スプレッドシート
+  // 追記先: 「(今期)予材リスト」スプレッドシート(現在は「31期予材リスト」)。
+  // 【重要: 期(会計年度)が変わったときの切り替え方】getTargetSpreadsheet_()が
+  // この値を見て対象スプレッドシートを解決する。
+  //   - 空文字('')にすると SpreadsheetApp.getActiveSpreadsheet() で自動解決する。
+  //     このスクリプトを「対象スプレッドシートのコンテナバインド型スクリプト」として運用し、
+  //     期が変わるたびに現在のスプレッドシートを「ファイル」>「コピーを作成」で丸ごと複製する
+  //     運用にしておけば、複製先にスクリプトごと複製されるため、この値を空文字のままにして
+  //     おくだけでコード側は一切変更不要のまま新しい期のスプレッドシートに切り替わる(推奨)。
+  //   - 具体的なスプレッドシートIDを設定すると、常にそのIDのスプレッドシートを開く(従来通り)。
+  //     1つのスタンドアロン スクリプト プロジェクトで複数期のスプレッドシートを渡り歩く場合や、
+  //     時間主導型トリガーの実行時にアクティブなスプレッドシートが存在しない環境ではこちらを使う。
+  //     この場合、期が変わったらこの値を新しいスプレッドシートのIDに書き換えるだけでよく、
+  //     他のコード・他の設定項目(下記シート名等)は一切変更不要。
   TARGET_SPREADSHEET_ID: '1zTz2lLUD6M4SPBCcEO3OBxNMmv1U7RsUYRJhkKkgOOQ',
+  // 「報告記録」「週次ステータス変更履歴」「今月」等のシート名(下記)は期の番号を含まない
+  // 名前で管理しているため、期が変わっても新しいスプレッドシート側に同名のシートさえ
+  // あれば、この設定自体は変更不要で引き続き正しく連携される。
   TARGET_SHEET_NAME: '報告記録',
 
-  // 週次ステータス変更履歴: 「週次報告記録」への追記直後に、直近の取り込み分から
+  // 週次ステータス変更履歴: 「報告記録」への追記直後に、直近の取り込み分から
   // 「見込確度」が変更前後で変化した案件だけを抽出して記録するシート名。
   STATUS_HISTORY_SHEET_NAME: '週次ステータス変更履歴',
   // 履歴シートの実際のレイアウト: 1行目=タイトル行、2行目=列見出し行、3行目以降=データ行。
@@ -52,21 +67,30 @@ const CONFIG = {
     '記録日時', '担当', '案件名', 'カテゴリ',
     '次回アクション予定日時', 'ネクストアクション', '昇降フラグ',
     '変更前見込確度', '変更後見込確度', '変更経緯',
-    '最新見積格納日', '契約見込月', '税込想定売上', '貢献利益率'
+    '最新見積格納日', '契約見込月', '税込想定売上', '貢献利益率', '備考（状況）'
   ],
   // 昇降フラグ列の名前。数式で↑/↓が算出される列のため、GASは値を書き込まず、
   // 既存行の数式をコピーして新規行に適用するためだけに使う。
   STATUS_HISTORY_RANK_FLAG_COLUMN: '昇降フラグ',
+  // 【重要】appendStatusHistoryRows_は、STATUS_HISTORY_COLUMNSのうちこの配列に含まれる
+  // 列名には一切値を書き込まない(セルに直接触れない)。「昇降フラグ」はシート側の数式
+  // (H列・I列を比較する数式)を保持するため、「変更経緯」は手動編集時のみ
+  // writeChangeReason_で個別に(理由が入力された場合だけ)追記更新する運用のため、
+  // それぞれ除外している。以前は行全体を履歴シートの最終列幅の配列としてまとめて
+  // 書き込んでいたため、これらの列も含めて空文字で上書きしてしまい、既存の数式や
+  // (行を先に用意して手動でメモ書きしていた場合の)入力内容を消してしまう恐れがあった。
+  // ここに列名を追加すれば、同様に「スクリプトからは触れさせたくない列」を増やせる。
+  STATUS_HISTORY_PROTECTED_COLUMNS: ['昇降フラグ', '変更経緯'],
   // 案件名列(既存シートの見た目に合わせたリンク色)。既定はGoogle Sheetsのリンク標準色。
   STATUS_HISTORY_LINK_COLOR: '#1155cc',
-  // 「週次報告記録」内で案件を一意に識別するための列名候補(先頭から順に探し、
+  // 「報告記録」内で案件を一意に識別するための列名候補(先頭から順に探し、
   // 最初に見つかった列をキーとして使う)。実際のANDPAD出力列名に合わせて調整すること。
   STATUS_HISTORY_KEY_COLUMN_CANDIDATES: ['案件名'],
-  // 転記条件となる「見込確度」列の名前候補(「週次報告記録」側の列名)。
+  // 転記条件となる「見込確度」列の名前候補(「報告記録」側の列名)。
   // 実際のANDPAD出力列名に合わせて調整すること。
   STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES: ['見込確度', '確度'],
-  // 履歴シートの各列に、「週次報告記録」側のどの列の値を転記するかの対応表。
-  // 値は「週次報告記録」側の列名候補の配列(先頭から探して最初に見つかったものを使う)。
+  // 履歴シートの各列に、「報告記録」側のどの列の値を転記するかの対応表。
+  // 値は「報告記録」側の列名候補の配列(先頭から探して最初に見つかったものを使う)。
   // 記録日時・案件名・昇降フラグ・変更前後の見込確度・変更経緯は別途組み立てるため、
   // ここには含めない。
   STATUS_HISTORY_FIELD_SOURCE_COLUMNS: {
@@ -77,16 +101,20 @@ const CONFIG = {
     '最新見積格納日': ['最新見積格納日'],
     '契約見込月': ['契約見込月'],
     '税込想定売上': ['税込想定売上'],
-    '貢献利益率': ['貢献利益率']
+    '貢献利益率': ['貢献利益率'],
+    '備考（状況）': ['備考（状況）', '備考(状況)', '備考']
   },
 
   // 「今月」等の予材シートでO列(見込確度)が手動編集された際に、変更理由の入力ダイアログを
   // 表示して「週次ステータス変更履歴」に記録する機能(onConfidenceCellEdited)で使う設定。
   // 対象とする予材シート名(複数可)。実際の運用シート名に合わせて追加・変更すること。
   CONFIDENCE_EDIT_SHEET_NAMES: ['今月'],
-  // 「今月」シートは列見出しが「週次報告記録」側と一致しない(または見出し行の構成が異なる)ため、
+  // 「今月」シートは列見出しが「報告記録」側と一致しない(または見出し行の構成が異なる)ため、
   // ヘッダー名でのマッチングは行わず、ここに設定した固定の列位置から直接値を抽出する。
   // 実際の「今月」シートの列位置に合わせて調整すること。
+  // 【重要】「今月」シートの実列(2026年版)で確認したところ、K列は「税込見積金額」であり
+  // 「税込想定売上」はAA列だった(見込確度=O列自体は正しかったが、この項目だけ列がズレていた)。
+  // シート構成が変わった場合は、実シートを確認のうえ必ずこの設定を更新すること。
   CONFIDENCE_EDIT_COLUMN_LETTERS: {
     '案件名': 'H',
     '担当': 'G',
@@ -96,8 +124,9 @@ const CONFIG = {
     '見込確度': 'O',
     '最新見積格納日': 'J',
     '契約見込月': 'R',
-    '税込想定売上': 'K',
-    '貢献利益率': 'L'
+    '税込想定売上': 'AA',
+    '貢献利益率': 'L',
+    '備考（状況）': 'T'
   },
 
   // 取り込み元ファイルの1行目がヘッダー行かどうか
@@ -126,6 +155,10 @@ function syncWeeklyReports() {
     const processedFolder = getOrCreateSubFolder_(sourceFolder, CONFIG.PROCESSED_FOLDER_NAME);
     const errorFolder = getOrCreateSubFolder_(sourceFolder, CONFIG.ERROR_FOLDER_NAME);
     const targetSheet = getTargetSheet_();
+    // CONFIG.TARGET_SPREADSHEET_IDが空文字(=getActiveSpreadsheet()で自動解決)の場合でも
+    // 対象スプレッドシート自身をソースファイルとして誤って処理しないよう、解決済みの
+    // targetSheetから実際のIDを取得して比較する(CONFIG.TARGET_SPREADSHEET_IDを直接見ない)。
+    const targetSpreadsheetId = targetSheet.getParent().getId();
 
     const files = sourceFolder.getFiles();
     const errors = [];
@@ -136,7 +169,7 @@ function syncWeeklyReports() {
       const file = files.next();
 
       if (!isSupportedSpreadsheet_(file)) continue;
-      if (file.getId() === CONFIG.TARGET_SPREADSHEET_ID) continue;
+      if (file.getId() === targetSpreadsheetId) continue;
 
       if (isAlreadyProcessed_(file.getId())) {
         Logger.log('既に処理済み(記録あり)のためスキップ、処理済みフォルダへ移動します: ' + file.getName());
@@ -252,12 +285,12 @@ function appendFileToTargetSheet_(file, targetSheet) {
 }
 
 /**
- * 「週次報告記録」への直近の追記分(newRows)を、追記前の既存データ(previousRows)と
+ * 「報告記録」への直近の追記分(newRows)を、追記前の既存データ(previousRows)と
  * 案件単位で突き合わせ、「見込確度」(CONFIG.STATUS_HISTORY_CONFIDENCE_COLUMN_CANDIDATES)が
  * 変更前後で変化した案件だけを抽出して「週次ステータス変更履歴」シートの末尾に記録する。
  * (ステータスや進捗など見込確度以外の変更は転記対象にしない)
- * 案件を識別するキー列や見込確度列が「週次報告記録」に存在しない場合は、何もせずスキップする。
- * reportSheet・reportLastRow(追記前の最終行)は、履歴側の案件名セルに「週次報告記録」の
+ * 案件を識別するキー列や見込確度列が「報告記録」に存在しない場合は、何もせずスキップする。
+ * reportSheet・reportLastRow(追記前の最終行)は、履歴側の案件名セルに「報告記録」の
  * 該当行へ飛べるリンクを張るために使う(リンク自体の見た目はbuildStatusHistoryChange_を参照)。
  */
 function updateWeeklyStatusHistory_(reportSheet, reportLastRow, headerMap, previousRows, newRows, timestamp) {
@@ -345,11 +378,12 @@ function buildStatusHistoryChange_(fields, projectName, oldConfidence, newConfid
   change['契約見込月'] = fields['契約見込月'] || '';
   change['税込想定売上'] = fields['税込想定売上'] || '';
   change['貢献利益率'] = fields['貢献利益率'] || '';
+  change['備考（状況）'] = fields['備考（状況）'] || '';
   return change;
 }
 
 /**
- * 「週次報告記録」側の候補列名リストから最初に見つかった列の値を読み取る。
+ * 「報告記録」側の候補列名リストから最初に見つかった列の値を読み取る。
  * どれも見つからない場合は空文字を返す。
  */
 function readTrackedField_(headerMap, row, candidateNames) {
@@ -394,23 +428,30 @@ function formatHistoryValue_(value) {
  * 見込確度が変化した案件を「週次ステータス変更履歴」シートの末尾に追記する。
  * 列はCONFIG.STATUS_HISTORY_COLUMNSの名前でマッチングするため、シート側の列順が
  * 変わっていても正しい列に入り、シートが空の場合はこの並びでヘッダーを新規作成する。
+ *
+ * 【重要】CONFIG.STATUS_HISTORY_PROTECTED_COLUMNS(既定: 昇降フラグ・変更経緯)に
+ * 含まれる列には一切書き込まない。以前は追記行をhistorySheet.getLastColumn()幅の
+ * 配列としてまとめて1回のsetValuesで書き込んでいたため、これらの列も含めて空文字で
+ * 上書きしてしまい、シート側の数式(昇降フラグ)や、行を先に用意して手動でメモ書きして
+ * いた内容(変更経緯等)を消してしまう恐れがあった。現在は書き込み対象の列だけを
+ * 1列ずつ個別のRangeとして書き込むため、保護対象の列や、STATUS_HISTORY_COLUMNSに
+ * 無い列(このシートに管理外の列が追加されている場合)には一切アクセスせず、
+ * 既存の内容がそのまま保持される。
+ * 「変更経緯」は、手動編集時のみwriteChangeReason_で(理由が入力された場合だけ)
+ * 別途追記更新する(onConfidenceCellEdited参照)。
+ *
+ * 戻り値: 実際に書き込んだ最初の行番号(1件のみ追記した場合は、その行番号そのもの)。
+ * onConfidenceCellEdited側で、後から変更経緯セルだけを追記更新するために使う。
  */
 function appendStatusHistoryRows_(changes) {
   const historySheet = getOrCreateStatusHistorySheet_();
   const historyColumns = CONFIG.STATUS_HISTORY_COLUMNS;
   const headerRowNumber = CONFIG.STATUS_HISTORY_HEADER_ROW || 1;
   const historyHeaderMap = ensureColumnsExist_(historySheet, historyColumns, historyColumns, headerRowNumber);
-  const historyTotalCols = historySheet.getLastColumn();
 
-  const historyRows = changes.map(function (change) {
-    const outRow = new Array(historyTotalCols).fill('');
-    historyColumns.forEach(function (colName) {
-      const col = historyHeaderMap[colName];
-      if (col && change[colName] !== undefined) {
-        outRow[col - 1] = change[colName];
-      }
-    });
-    return outRow;
+  const protectedColumns = CONFIG.STATUS_HISTORY_PROTECTED_COLUMNS || [];
+  const writableColumns = historyColumns.filter(function (colName) {
+    return protectedColumns.indexOf(colName) === -1;
   });
 
   // getLastRow()はシート全体(どの列でもよい)の最終行を見るため、他の列に離れた場所まで
@@ -421,11 +462,53 @@ function appendStatusHistoryRows_(changes) {
   const dateCol = historyHeaderMap[historyColumns[0]];
   const dataStartRow = headerRowNumber + 1;
   const historyLastRow = findLastRowWithValueInColumn_(historySheet, dateCol, dataStartRow);
-  const historyAppendRange = historySheet.getRange(historyLastRow + 1, 1, historyRows.length, historyTotalCols);
-  writeValuesIgnoringValidation_(historyAppendRange, historyRows);
+  const startRow = historyLastRow + 1;
 
-  applyRankFlagFormula_(historySheet, historyHeaderMap, historyLastRow, historyRows.length);
-  applyProjectNameLinks_(historySheet, historyHeaderMap, historyLastRow, changes);
+  // 行ごとではなく列ごとに1回のRange.setValuesでまとめて書き込む。こうすることで、
+  // 書き込み対象の列だけに絞ったRangeを扱えるため、保護対象の列(昇降フラグ・変更経緯等)や
+  // STATUS_HISTORY_COLUMNSに無い列には一切Rangeが及ばず、確実に触れずに済む。
+  writableColumns.forEach(function (colName) {
+    const col = historyHeaderMap[colName];
+    if (!col) return;
+    const columnValues = changes.map(function (change) {
+      return [change[colName] !== undefined ? change[colName] : ''];
+    });
+    writeValuesIgnoringValidation_(historySheet.getRange(startRow, col, columnValues.length, 1), columnValues);
+  });
+
+  // 昇降フラグの数式コピー・案件名リンクの設定は見た目を整えるための付随処理。
+  // ここで例外が発生しても、直前に書き込んだ履歴データ自体(記録日時・見込確度の変化等)を
+  // 無かったことにしてはならないため、失敗してもロールバックや呼び出し元への例外伝播は
+  // せず、ログにのみ残す(そうしないと「本体は記録できたのに全体が失敗扱いになり、
+  // 履歴が更新されていないように見える」事態になる)。
+  try {
+    applyRankFlagFormula_(historySheet, historyHeaderMap, historyLastRow, changes.length);
+  } catch (err) {
+    Logger.log('週次ステータス変更履歴: 昇降フラグの数式コピーに失敗しました(記録データ自体は書き込み済み): ' + err);
+  }
+  try {
+    applyProjectNameLinks_(historySheet, historyHeaderMap, historyLastRow, changes);
+  } catch (err) {
+    Logger.log('週次ステータス変更履歴: 案件名リンクの設定に失敗しました(記録データ自体は書き込み済み): ' + err);
+  }
+
+  return startRow;
+}
+
+/**
+ * 履歴シートの指定行の「変更経緯」セルだけを追記更新する。
+ * onConfidenceCellEdited側で、まず理由なしで記録を確定させた後、変更理由の入力
+ * ダイアログ(Ui.prompt、失敗しうる)が成功した場合にのみベストエフォートで呼び出す。
+ */
+function writeChangeReason_(row, reason) {
+  const historySheet = getOrCreateStatusHistorySheet_();
+  const headerRowNumber = CONFIG.STATUS_HISTORY_HEADER_ROW || 1;
+  const historyHeaderMap = ensureColumnsExist_(
+    historySheet, CONFIG.STATUS_HISTORY_COLUMNS, CONFIG.STATUS_HISTORY_COLUMNS, headerRowNumber
+  );
+  const col = historyHeaderMap['変更経緯'];
+  if (!col) return;
+  historySheet.getRange(row, col).setValue(reason);
 }
 
 /**
@@ -451,7 +534,7 @@ function findLastRowWithValueInColumn_(sheet, col, startRow) {
 
 /**
  * 案件名列に、既存シートの見た目(リンク青色 + 下線)に合わせたリッチテキストを設定する。
- * リンク先はchange['__案件名リンクURL']に組み立て済みの「週次報告記録」該当行への
+ * リンク先はchange['__案件名リンクURL']に組み立て済みの「報告記録」該当行への
  * 内部リンクで、リンクが無い場合(reportSheetの行が特定できなかった場合)でも
  * 色・下線のスタイルだけは既存の見た目に合わせて適用する。
  */
@@ -538,9 +621,11 @@ function findNearestFormulaRow_(sheet, col, fromRow, minRow) {
 
 /**
  * 「週次ステータス変更履歴」シートを取得する。存在しなければ新規作成する。
+ * 対象スプレッドシートの解決はgetTargetSpreadsheet_()に委ねる(期が変わった際の
+ * 切り替え方はそちらのコメントを参照)。
  */
 function getOrCreateStatusHistorySheet_() {
-  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  const ss = getTargetSpreadsheet_();
   let sheet = ss.getSheetByName(CONFIG.STATUS_HISTORY_SHEET_NAME);
   if (!sheet) {
     sheet = ss.insertSheet(CONFIG.STATUS_HISTORY_SHEET_NAME);
@@ -557,7 +642,7 @@ function getOrCreateStatusHistorySheet_() {
  * 登録すること(GASエディタで直接「onEdit」という名前の関数を作っても、この制限により
  * ダイアログの部分は動作しない)。
  *
- * - 「今月」シートは列見出しが「週次報告記録」側と一致しない(または見出し行の構成が異なる)ため、
+ * - 「今月」シートは列見出しが「報告記録」側と一致しない(または見出し行の構成が異なる)ため、
  *   ヘッダー名でのマッチングは行わず、CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERSに設定した
  *   固定の列位置から直接値を抽出する(readConfidenceEditField_参照)。
  * - 対象は「見込確度」列(CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERS['見込確度']、既定でO列)の
@@ -568,39 +653,75 @@ function getOrCreateStatusHistorySheet_() {
  * - 記録に失敗しても例外は投げず、ログとアラートに留める(セルの編集自体は既に確定しているため)。
  */
 function onConfidenceCellEdited(e) {
-  if (!e || !e.range) return;
-
-  const sheet = e.range.getSheet();
-  if (CONFIG.CONFIDENCE_EDIT_SHEET_NAMES.indexOf(sheet.getName()) === -1) return;
-
-  // ペースト等の複数セル編集はoldValueを個別に取得できないため対象外。
-  if (e.range.getNumRows() !== 1 || e.range.getNumColumns() !== 1) return;
-
-  const editedRow = e.range.getRow();
-  if (editedRow === 1) return; // ヘッダー行自体の編集は対象外
-
-  const confidenceCol = columnLetterToIndex_(CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERS['見込確度']);
-  if (e.range.getColumn() !== confidenceCol) return;
-
-  const lastCol = sheet.getLastColumn();
-  if (lastCol === 0) return;
-  // 編集された行の現在値(編集確定後の状態)をまとめて取得し、以降はここから固定列位置で
-  // 直接読み取る(ヘッダー名マッチングには依存しない)。
-  const rowValues = sheet.getRange(editedRow, 1, 1, lastCol).getValues()[0];
-
-  const oldConfidence = e.oldValue !== undefined ? e.oldValue : '';
-  // 変更後の値はe.valueではなく、確定後の状態を反映するrowValues(上で取得済み)から読む方が
-  // 確実(貼り付け以外の一部の編集種別ではe.valueが入らないことがあるため)。
-  const newConfidence = readConfidenceEditField_(rowValues, '見込確度');
-  // 変更前見込確度が空欄(=新規登録による初回設定)の場合は「確度の変更」ではないため対象外とする。
-  if (normalizeHistoryValue_(oldConfidence) === '') return;
-  if (historyValuesEqual_(oldConfidence, newConfidence)) return;
-
+  // 【重要】以前はガード判定(シート名・列位置チェック等)をtryの外に書いていたため、
+  // その部分で例外が起きると(例: CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERSの設定ミスや
+  // シート構成の変更によるgetRange失敗など)ログにすら残らず、ポップアップも履歴記録も
+  // 一切発生しないまま処理が終わっていた。関数全体をtryで包み、原因を問わず失敗時は
+  // 必ずログ・トーストのいずれかで気づけるようにする。
   try {
+    if (!e || !e.range) {
+      Logger.log('onConfidenceCellEdited: イベントオブジェクトにrangeが無いため終了します。');
+      return;
+    }
+
+    const sheet = e.range.getSheet();
+    if (CONFIG.CONFIDENCE_EDIT_SHEET_NAMES.indexOf(sheet.getName()) === -1) return;
+
+    // ペースト等の複数セル編集はoldValueを個別に取得できないため対象外。
+    if (e.range.getNumRows() !== 1 || e.range.getNumColumns() !== 1) {
+      Logger.log(
+        'onConfidenceCellEdited: 複数セル編集(' + sheet.getName() + '!' + e.range.getA1Notation() +
+          ')のため対象外とします。'
+      );
+      return;
+    }
+
+    const editedRow = e.range.getRow();
+    if (editedRow === 1) return; // ヘッダー行自体の編集は対象外
+
+    const confidenceCol = columnLetterToIndex_(CONFIG.CONFIDENCE_EDIT_COLUMN_LETTERS['見込確度']);
+    if (e.range.getColumn() !== confidenceCol) return; // 見込確度以外の列編集は対象外(頻出のためログ省略)
+
+    const lastCol = sheet.getLastColumn();
+    if (lastCol === 0) {
+      Logger.log('onConfidenceCellEdited: 「' + sheet.getName() + '」にデータが無いため終了します。');
+      return;
+    }
+    // 編集された行の現在値(編集確定後の状態)をまとめて取得し、以降はここから固定列位置で
+    // 直接読み取る(ヘッダー名マッチングには依存しない)。
+    const rowValues = sheet.getRange(editedRow, 1, 1, lastCol).getValues()[0];
+
+    const oldConfidence = e.oldValue !== undefined ? e.oldValue : '';
+    // 変更後の値はe.valueではなく、確定後の状態を反映するrowValues(上で取得済み)から読む方が
+    // 確実(貼り付け以外の一部の編集種別ではe.valueが入らないことがあるため)。
+    const newConfidence = readConfidenceEditField_(rowValues, '見込確度');
+    // 変更前見込確度が空欄(=新規登録による初回設定)の場合は「確度の変更」ではないため対象外とする。
+    if (normalizeHistoryValue_(oldConfidence) === '') {
+      Logger.log(
+        'onConfidenceCellEdited: ' + sheet.getName() + '!' + e.range.getA1Notation() +
+          ' は変更前見込確度が空欄(新規登録扱い)のため対象外とします。(新しい値: ' + newConfidence + ')' +
+          (e.oldValue === undefined
+            ? ' ※e.oldValueが未定義でした(GASの仕様上、編集前セルが空欄だった場合等に発生します)。'
+            : '')
+      );
+      return;
+    }
+    if (historyValuesEqual_(oldConfidence, newConfidence)) {
+      Logger.log(
+        'onConfidenceCellEdited: ' + sheet.getName() + '!' + e.range.getA1Notation() +
+          ' は値に実質的な変化が無いため対象外とします。(旧: ' + oldConfidence + ' / 新: ' + newConfidence + ')'
+      );
+      return;
+    }
+
+    Logger.log(
+      'onConfidenceCellEdited: 見込確度の変更を検知しました。' + sheet.getName() + '!' + e.range.getA1Notation() +
+        ' (旧: ' + oldConfidence + ' → 新: ' + newConfidence + ')'
+    );
+
     const projectName = String(readConfidenceEditField_(rowValues, '案件名')).trim();
     const displayName = projectName || ('(' + sheet.getName() + ' ' + editedRow + '行目)');
 
-    const reason = promptForChangeReason_(displayName, oldConfidence, newConfidence);
     // 案件名セル(「今月」シート側)に既にリッチテキストのリンクが設定されていれば、
     // そのリンク先URLをそのまま引き継ぐ。リンクが無いセルの場合のみ、従来通り
     // 「今月」シートの該当行への内部リンクにフォールバックする。
@@ -617,23 +738,63 @@ function onConfidenceCellEdited(e) {
       '最新見積格納日': readConfidenceEditField_(rowValues, '最新見積格納日'),
       '契約見込月': readConfidenceEditField_(rowValues, '契約見込月'),
       '税込想定売上': readConfidenceEditField_(rowValues, '税込想定売上'),
-      '貢献利益率': readConfidenceEditField_(rowValues, '貢献利益率')
+      '貢献利益率': readConfidenceEditField_(rowValues, '貢献利益率'),
+      '備考（状況）': readConfidenceEditField_(rowValues, '備考（状況）')
     };
 
+    // 【重要】変更理由の入力ダイアログ(Ui.prompt)は、このスクリプトプロジェクトが
+    // 対象スプレッドシートのコンテナバインド型スクリプトとして設置されていない場合
+    // (スタンドアロンのスクリプトプロジェクトの場合)、SpreadsheetApp.getUi()自体が
+    // 例外を投げ、常に失敗する。ダイアログの成否に関わらず「見込確度が変わった」という
+    // 事実の記録は必ず残すべきなので、先に理由なしで記録を確定させ、ダイアログの表示・
+    // 入力に成功した場合だけ、後から変更経緯セルを追記更新する(記録自体を
+    // ダイアログの可否に依存させない)。
     const change = buildStatusHistoryChange_(
-      fields, displayName, oldConfidence, newConfidence, new Date(), reportRowLink, reason
+      fields, displayName, oldConfidence, newConfidence, new Date(), reportRowLink, ''
     );
-    appendStatusHistoryRows_([change]);
+    const appendedRow = appendStatusHistoryRows_([change]);
+    Logger.log(
+      'onConfidenceCellEdited: 「' + CONFIG.STATUS_HISTORY_SHEET_NAME + '」の' + appendedRow + '行目に記録しました。'
+    );
+
+    const reason = promptForChangeReason_(displayName, oldConfidence, newConfidence);
+    if (reason) {
+      writeChangeReason_(appendedRow, reason);
+    }
   } catch (err) {
     Logger.log(
       '週次ステータス変更履歴(手動編集分)の記録に失敗しました: ' +
-        sheet.getName() + '!' + e.range.getA1Notation() + ' / ' + err
+        (e && e.range ? e.range.getSheet().getName() + '!' + e.range.getA1Notation() : '(不明なセル)') +
+        ' / ' + err
     );
-    try {
-      SpreadsheetApp.getUi().alert('見込確度の変更履歴の記録に失敗しました。管理者に連絡してください。\n' + err);
-    } catch (uiErr) {
-      // アラート表示自体に失敗しても、記録失敗の実害はログに残っているため無視する。
-    }
+    notifyConfidenceEditError_(err, e);
+  }
+}
+
+/**
+ * onConfidenceCellEdited内の例外を、Logger.logだけでなく画面上にも必ず気づける形で通知する。
+ * SpreadsheetApp.getActiveSpreadsheet()はスタンドアロンのスクリプトプロジェクトでは
+ * 使えない場合があるため、まずイベントオブジェクトから直接取得したSpreadsheet
+ * (e.range.getSheet().getParent())でtoastを試み、それも使えない場合のみ
+ * getActiveSpreadsheet()にフォールバックする。どちらも失敗する場合はログのみに留める。
+ */
+function notifyConfidenceEditError_(err, e) {
+  const message = String(err);
+  const title = '見込確度の変更履歴の記録でエラーが発生しました';
+  try {
+    const ss = (e && e.range) ? e.range.getSheet().getParent() : SpreadsheetApp.getActiveSpreadsheet();
+    ss.toast(message, title, 10);
+    return;
+  } catch (toastErr) {
+    Logger.log('エラー通知(toast)に失敗しました(e由来のSpreadsheet): ' + toastErr);
+  }
+  try {
+    SpreadsheetApp.getActiveSpreadsheet().toast(message, title, 10);
+  } catch (toastErr2) {
+    Logger.log(
+      'エラー通知(toast)にも失敗しました(このスクリプトがスプレッドシートに' +
+        'バインドされていない可能性があります): ' + toastErr2
+    );
   }
 }
 
@@ -642,8 +803,22 @@ function onConfidenceCellEdited(e) {
  * 表示できない場合は空文字を返す(変更自体の記録は妨げない)。
  */
 function promptForChangeReason_(projectName, oldConfidence, newConfidence) {
+  let ui;
   try {
-    const ui = SpreadsheetApp.getUi();
+    ui = SpreadsheetApp.getUi();
+  } catch (err) {
+    // 【重要】SpreadsheetApp.getUi()は、このスクリプトプロジェクトが対象スプレッドシートの
+    // コンテナバインド型スクリプト(そのスプレッドシートの「拡張機能」>「Apps Script」から
+    // 開けるプロジェクト)として設置されていない場合、常にこの時点で例外を投げる。
+    // ポップアップが一度も表示されない場合は、まずこのログが出ていないか確認すること。
+    Logger.log(
+      '変更理由の入力ダイアログを表示できませんでした(このスクリプトが対象スプレッドシートの' +
+        'コンテナバインド型スクリプトとして設置されていない可能性があります。記録自体は理由なしで' +
+        '完了しています): ' + err
+    );
+    return '';
+  }
+  try {
     const response = ui.prompt(
       '見込確度の変更理由を入力してください',
       '案件: ' + projectName + '\n見込確度: ' +
@@ -653,7 +828,7 @@ function promptForChangeReason_(projectName, oldConfidence, newConfidence) {
     if (response.getSelectedButton() !== ui.Button.OK) return '';
     return response.getResponseText().trim();
   } catch (err) {
-    Logger.log('変更理由の入力ダイアログを表示できませんでした(理由は空欄で記録します): ' + err);
+    Logger.log('変更理由の入力ダイアログの表示中にエラーが発生しました(理由は空欄で記録します): ' + err);
     return '';
   }
 }
@@ -1246,8 +1421,37 @@ function getOrCreateSubFolder_(parentFolder, name) {
   return parentFolder.createFolder(name);
 }
 
+/**
+ * 「予材リスト」(報告記録・週次ステータス変更履歴・今月シート等)が入っている
+ * 対象スプレッドシートを取得する。
+ *
+ * 【重要: 期(会計年度)が変わったときの切り替え方】
+ * - CONFIG.TARGET_SPREADSHEET_ID が空文字の場合は SpreadsheetApp.getActiveSpreadsheet()
+ *   (=このスクリプトプロジェクトがコンテナバインドされているスプレッドシート、または
+ *   インストーラブルトリガーの発火元スプレッドシート)を返す。
+ *   このため、期が変わった際に「現在のスプレッドシートを丸ごと複製する」(Google Sheets の
+ *   「ファイル」>「コピーを作成」)運用にしておけば、コンテナバインド型スクリプトも複製先に
+ *   自動的について来るため、TARGET_SPREADSHEET_ID を空文字のままにしておくだけで
+ *   コード側は一切変更不要のまま新しい期のスプレッドシートに切り替わる。
+ * - CONFIG.TARGET_SPREADSHEET_ID に具体的なIDを設定した場合は、常にそのIDのスプレッドシートを
+ *   SpreadsheetApp.openById()で開く(従来通りの挙動)。1つのスタンドアロン スクリプト
+ *   プロジェクトで複数期のスプレッドシートを渡り歩くように運用したい場合や、
+ *   時間主導型トリガー実行時にアクティブなスプレッドシートが存在しない環境向け。
+ *   この場合、期が変わったらこの値だけを新しいスプレッドシートのIDに書き換えれば良い
+ *   (コードの他の箇所は一切変更不要)。
+ * どちらの運用でも、「報告記録」「週次ステータス変更履歴」「今月」等のシート名自体は
+ * CONFIG.TARGET_SHEET_NAME / CONFIG.STATUS_HISTORY_SHEET_NAME / CONFIG.CONFIDENCE_EDIT_SHEET_NAMES
+ * で管理しており、期の番号を含まない名前のため、新しい期のスプレッドシート側にも
+ * 同名のシートさえあれば変更不要で連携される。
+ */
+function getTargetSpreadsheet_() {
+  return CONFIG.TARGET_SPREADSHEET_ID
+    ? SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID)
+    : SpreadsheetApp.getActiveSpreadsheet();
+}
+
 function getTargetSheet_() {
-  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  const ss = getTargetSpreadsheet_();
   let sheet = ss.getSheetByName(CONFIG.TARGET_SHEET_NAME);
   if (!sheet) {
     sheet = ss.insertSheet(CONFIG.TARGET_SHEET_NAME);
@@ -1286,9 +1490,12 @@ function installWeeklyTrigger() {
  * 必ず「インストーラブル トリガー」として、イベントの種類を「編集時」で設定すること。
  * 単純トリガーのonEdit(e)ではダイアログが表示できないため、この機能には使えない。)
  * 既存の onConfidenceCellEdited 用トリガーがあれば一旦削除してから作り直す。
+ * 対象スプレッドシートの解決はgetTargetSpreadsheet_()に委ねる。期が変わって新しい
+ * スプレッドシートに切り替えた場合も、この関数を再実行するだけで新しい対象スプレッドシートに
+ * 対してトリガーが張り直される。
  */
 function installConfidenceChangeTrigger() {
-  const ss = SpreadsheetApp.openById(CONFIG.TARGET_SPREADSHEET_ID);
+  const ss = getTargetSpreadsheet_();
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
     if (trigger.getHandlerFunction() === 'onConfidenceCellEdited') {
       ScriptApp.deleteTrigger(trigger);
